@@ -53,12 +53,11 @@ function buildThinkingFields(
   // 客户端明确关闭 thinking
   if (clientThinking?.type === 'disabled') return undefined
 
-  // 没有模型元数据时，回退到旧逻辑：仅传 { thinking: { type: 'adaptive' } }
+  // 没有模型能力元数据时，仅保留客户端显式 thinking 请求。
+  // 不根据 effort 猜测 adaptive thinking：Haiku 4.5 / Sonnet 4.5 等旧模型不支持 effort，
+  // 错误注入 additionalModelRequestFields 会被 Kiro 直接拒绝。
   if (!thinkingConfig) {
     if (clientThinking && clientThinking.type !== 'disabled') {
-      return { thinking: { type: 'adaptive' } }
-    }
-    if (clientReasoningEffort) {
       return { thinking: { type: 'adaptive' } }
     }
     return undefined
@@ -997,7 +996,7 @@ export function claudeToKiro(
   const additionalModelRequestFields = buildThinkingFields(
     thinkingConfig,
     request.thinking as { type: string; budget_tokens?: number; display?: string },
-    undefined
+    request.output_config?.effort
   )
 
   return buildKiroPayload(

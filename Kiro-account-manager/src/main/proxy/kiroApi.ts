@@ -286,7 +286,11 @@ const MODEL_ID_MAP: Record<string, string> = {
   'claude-3-opus': 'claude-sonnet-4.5',
   'claude-3-sonnet': 'claude-sonnet-4',
   'claude-3-haiku': 'claude-haiku-4.5',
-  // GPT 兼容映射 (映射到 Sonnet 4.5)
+  // GPT-5.6 系列（Kiro 原生支持，必须原样透传）
+  'gpt-5.6-luna': 'gpt-5.6-luna',
+  'gpt-5.6-terra': 'gpt-5.6-terra',
+  'gpt-5.6-sol': 'gpt-5.6-sol',
+  // 旧 GPT 兼容映射（Kiro 不原生提供时映射到 Sonnet 4.5）
   'gpt-4': 'claude-sonnet-4.5',
   'gpt-4o': 'claude-sonnet-4.5',
   'gpt-4-turbo': 'claude-sonnet-4.5',

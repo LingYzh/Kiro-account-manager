@@ -194,9 +194,12 @@ function buildClientModel(input: {
   const outputModalities: ModelModality[] = ['text']
   const output = modelOutputLimit(input.id, input.maxOutputTokens)
   const context = typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? input.maxInputTokens : 200000
-  const hasThinking = !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config
-  const reasoning = hasThinking
-  const interleaved = hasThinking ? { field: 'reasoning_content' as const } : false
+  const schemaProps = input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined
+  const thinkingSchema = extractThinkingSchema(input.additionalModelRequestFieldsSchema)
+  const hasVisibleThinking = !!schemaProps?.thinking || !!schemaProps?.output_config
+  const reasoning = hasVisibleThinking || thinkingSchema?.schemaPath === 'reasoning'
+  // GPT-5.6 等 reasoning.effort 模型使用隐藏 CoT；支持 reasoning 不代表会返回 reasoning_content。
+  const interleaved = hasVisibleThinking ? { field: 'reasoning_content' as const } : false
 
   return {
     id: input.id,
@@ -236,9 +239,9 @@ function buildClientModel(input: {
     inputTypes: input.supportedInputTypes,
     rateMultiplier: input.rateMultiplier,
     rateUnit: input.rateUnit,
-    supportsThinking: !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config,
-    thinkingEfforts: extractThinkingSchema(input.additionalModelRequestFieldsSchema)?.efforts,
-    thinkingSchemaPath: extractThinkingSchema(input.additionalModelRequestFieldsSchema)?.schemaPath,
+    supportsThinking: reasoning,
+    thinkingEfforts: thinkingSchema?.efforts,
+    thinkingSchemaPath: thinkingSchema?.schemaPath,
     supportsPromptCaching: input.promptCaching?.supportsPromptCaching || false,
     modelProvider: input.modelProvider || undefined,
     permission: [],
@@ -1060,7 +1063,7 @@ export class ProxyServer {
       maxOutputTokens: m.tokenLimits?.maxOutputTokens,
       rateMultiplier: m.rateMultiplier,
       rateUnit: m.rateUnit,
-      supportsThinking: !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config,
+      supportsThinking: !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config || extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.schemaPath === 'reasoning',
       thinkingEfforts: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.efforts,
       thinkingSchemaPath: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.schemaPath,
       supportsPromptCaching: m.promptCaching?.supportsPromptCaching || false,

@@ -123,6 +123,9 @@ export function getModelContextLength(modelId: string | undefined | null): numbe
   if (id.includes('claude-instant')) return 100000
 
   // GPT 系列
+  // Kiro 官方 GPT-5.6 Sol/Terra/Luna 均为 272K context；正常情况下优先使用 live model cache，
+  // 此处仅作为首次请求或模型元数据不可用时的安全 fallback。
+  if (id.includes('gpt-5.6')) return 272000
   if (id.includes('gpt-4o') || id.includes('gpt-4-turbo')) return 128000
   if (id.includes('gpt-4.1')) return 1000000
   if (id.includes('gpt-4-32k')) return 32768
