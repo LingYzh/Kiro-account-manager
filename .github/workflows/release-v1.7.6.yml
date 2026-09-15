@@ -1,0 +1,71 @@
+name: Prepare v1.7.6 Release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/release-trigger-v1.7.6'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  prepare-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Insert v1.7.6 changelog into README files
+        shell: python
+        run: |
+          from pathlib import Path
+
+          targets = [
+              (Path('README_CN.md'), '## 📋 更新日志', Path('.github/release-notes/v1.7.6-cn.md')),
+              (Path('README.md'), '## 📋 Changelog', Path('.github/release-notes/v1.7.6-en.md')),
+          ]
+
+          for readme, marker, note_file in targets:
+              text = readme.read_text(encoding='utf-8')
+              if '### v1.7.6 ' in text:
+                  print(f'{readme}: v1.7.6 already present, skipping')
+                  continue
+              if marker not in text:
+                  raise RuntimeError(f'{readme}: changelog marker not found: {marker}')
+
+              note = note_file.read_text(encoding='utf-8').strip()
+              needle = marker + '\n'
+              replacement = marker + '\n\n' + note + '\n'
+              text = text.replace(needle, replacement, 1)
+              readme.write_text(text, encoding='utf-8', newline='\n')
+              print(f'{readme}: inserted v1.7.6 changelog')
+
+      - name: Commit README changelog
+        run: |
+          if git diff --quiet -- README.md README_CN.md; then
+            echo "README changelog already up to date"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md README_CN.md
+            git commit -m "docs: add v1.7.6 changelog"
+            git push origin HEAD:master
+          fi
+
+      - name: Dispatch Build & Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref master
+
+      - name: Confirm dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Build & Release dispatched for master"
+          gh run list --workflow build.yml --branch master --limit 3
