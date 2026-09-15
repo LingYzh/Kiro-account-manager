@@ -8,6 +8,7 @@ import type {
   OpenAIStreamChunk,
   OpenAIResponsesRequest,
   OpenAIResponsesResponse,
+  OpenAIResponseInputItem,
   OpenAIResponseContentPart,
   OpenAIResponseOutputItem,
   ClaudeRequest,
@@ -29,78 +30,10 @@ import type {
 } from './types'
 import { buildKiroPayload, mapModelId } from './kiroApi'
 import { ToolNameRegistry } from './toolNameRegistry'
+import { buildThinkingFields, type ThinkingConfig } from './modelCapabilities'
+export type { ThinkingConfig } from './modelCapabilities'
 
 const KIRO_CACHE_POINT: KiroCachePoint = { type: 'default' }
-
-/** 模型 thinking 能力元数据（由 proxyServer 从模型缓存中查询后传入） */
-export interface ThinkingConfig {
-  schemaPath: 'output_config' | 'reasoning'
-  efforts: string[]
-  defaultEffort?: string
-}
-
-/**
- * 将客户端 effort / thinking 参数 + 模型 schema path 映射为 Kiro additionalModelRequestFields。
- * 官方 Kiro IDE 的 kr() 函数逻辑：
- *   output_config → { thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort } }
- *   reasoning     → { reasoning: { effort } }
- */
-function buildThinkingFields(
-  thinkingConfig: ThinkingConfig | undefined,
-  clientThinking?: { type: string; budget_tokens?: number; display?: string },
-  clientReasoningEffort?: string
-): Record<string, unknown> | undefined {
-  // 客户端明确关闭 thinking
-  if (clientThinking?.type === 'disabled') return undefined
-
-  // 没有模型能力元数据时，仅保留客户端显式 thinking 请求。
-  // 不根据 effort 猜测 adaptive thinking：Haiku 4.5 / Sonnet 4.5 等旧模型不支持 effort，
-  // 错误注入 additionalModelRequestFields 会被 Kiro 直接拒绝。
-  if (!thinkingConfig) {
-    if (clientThinking && clientThinking.type !== 'disabled') {
-      return { thinking: { type: 'adaptive' } }
-    }
-    return undefined
-  }
-
-  // 客户端没请求 thinking 也没请求 reasoning_effort → 不启用
-  const wantsThinking = !!(clientThinking && clientThinking.type !== 'disabled') || !!clientReasoningEffort
-  if (!wantsThinking) return undefined
-
-  // 映射 effort level（直接使用客户端值，不做强制转换）
-  const mapEffort = (input: string): string => input.toLowerCase()
-
-  let effort: string
-  if (clientReasoningEffort) {
-    effort = mapEffort(clientReasoningEffort)
-  } else if (clientThinking?.type === 'enabled' && clientThinking.budget_tokens) {
-    // budget_tokens 粗略映射到 effort level
-    const b = clientThinking.budget_tokens
-    if (b <= 4000) effort = 'low'
-    else if (b <= 16000) effort = 'medium'
-    else if (b <= 64000) effort = 'high'
-    else effort = 'xhigh'
-  } else {
-    effort = thinkingConfig.defaultEffort || 'high'
-  }
-
-  // 确保 effort 在可用范围内，否则取最接近的
-  if (!thinkingConfig.efforts.includes(effort)) {
-    effort = thinkingConfig.efforts[thinkingConfig.efforts.length - 1] || 'high'
-  }
-
-  switch (thinkingConfig.schemaPath) {
-    case 'output_config':
-      return {
-        thinking: { type: 'adaptive', display: 'summarized' },
-        output_config: { effort }
-      }
-    case 'reasoning':
-      return { reasoning: { effort } }
-    default:
-      return { thinking: { type: 'adaptive' } }
-  }
-}
 
 function toKiroCachePoint(cacheControl?: { type: string }): KiroCachePoint | undefined {
   if (!cacheControl) return undefined
@@ -118,188 +51,350 @@ function mergeCachePoint(
 }
 
 export function responsesToOpenAIChat(request: OpenAIResponsesRequest): OpenAIChatRequest {
-  if (!request || typeof request !== 'object') {
-    throw new Error('Responses request body must be an object')
-  }
-  if (!request.model) {
-    throw new Error('Responses request requires model')
-  }
-  if (request.input === undefined) {
-    throw new Error('Responses request requires input')
-  }
-
-  const messages: OpenAIMessage[] = []
-  if (request.instructions) {
-    messages.push({ role: 'system', content: request.instructions })
-  }
-  if (typeof request.input === 'string') {
-    messages.push({ role: 'user', content: request.input })
-  } else {
-    if (!Array.isArray(request.input)) {
-      throw new Error('Responses input must be a string or an array')
+    if (!request || typeof request !== 'object') {
+        throw new Error('Responses request body must be an object')
     }
-    for (const item of request.input) {
-      const itemType = item.type as string | undefined
-      if (itemType === 'function_call_output') {
-        if (!item.call_id) {
-          throw new Error('function_call_output requires call_id')
+    if (!request.model) {
+        throw new Error('Responses request requires model')
+    }
+    if (request.input === undefined) {
+        throw new Error('Responses request requires input')
+    }
+    if (request.previous_response_id != null) {
+        if (typeof request.previous_response_id !== 'string') {
+            throw new Error('Responses previous_response_id must be a string')
         }
-        if (item.output === undefined) {
-          throw new Error('function_call_output requires output')
+        if (request.previous_response_id.length > 0) {
+            throw new Error(
+                'Responses previous_response_id is not supported; send the conversation input explicitly'
+            )
         }
-        messages.push({
-          role: 'tool',
-          content: item.output,
-          tool_call_id: item.call_id
-        })
-      } else if (itemType === 'function_call') {
-        if (!item.call_id) {
-          throw new Error('function_call requires call_id')
+    }
+
+    const messages: OpenAIMessage[] = []
+    if (request.instructions) {
+        messages.push({ role: 'system', content: request.instructions })
+    }
+    if (typeof request.input === 'string') {
+        messages.push({ role: 'user', content: request.input })
+    } else {
+        if (!Array.isArray(request.input)) {
+            throw new Error('Responses input must be a string or an array')
         }
-        if (!item.name) {
-          throw new Error('function_call requires name')
+        for (let index = 0; index < request.input.length; index++) {
+            const rawItem: unknown = request.input[index]
+            if (!isResponseRecord(rawItem)) {
+                throw new Error(`Responses input item at index ${index} must be an object`)
+            }
+            const item = rawItem as OpenAIResponseInputItem
+            const itemType = item.type as string | undefined
+            if (itemType === 'reasoning') {
+                if (item.encrypted_content !== undefined) {
+                    throw new Error(
+                        'Encrypted Responses reasoning input is not supported by this proxy'
+                    )
+                }
+                throw new Error('Responses reasoning input items are not supported by this proxy')
+            }
+            if (itemType === 'function_call_output') {
+                if (typeof item.call_id !== 'string' || !item.call_id) {
+                    throw new Error('function_call_output requires call_id')
+                }
+                if (typeof item.output !== 'string' && !Array.isArray(item.output)) {
+                    throw new Error('function_call_output requires output')
+                }
+                messages.push({
+                    role: 'tool',
+                    content: convertResponseInputContent(item.output),
+                    tool_call_id: item.call_id
+                })
+            } else if (itemType === 'function_call') {
+                if (typeof item.call_id !== 'string' || !item.call_id) {
+                    throw new Error('function_call requires call_id')
+                }
+                if (typeof item.name !== 'string' || !item.name) {
+                    throw new Error('function_call requires name')
+                }
+                if (typeof item.arguments !== 'string') {
+                    throw new Error('function_call requires arguments as a JSON string')
+                }
+                const previous = messages.at(-1)
+                const toolCall: NonNullable<OpenAIMessage['tool_calls']>[number] = {
+                    id: item.call_id,
+                    type: 'function',
+                    function: { name: item.name, arguments: item.arguments }
+                }
+                // 同一轮 Responses 可返回多个 function_call；合并才能保留成对工具结果。
+                if (previous?.role === 'assistant') {
+                    previous.tool_calls = [...(previous.tool_calls || []), toolCall]
+                } else {
+                    messages.push({
+                        role: 'assistant',
+                        content: '',
+                        tool_calls: [toolCall]
+                    })
+                }
+            } else {
+                if (itemType !== undefined && itemType !== 'message') {
+                    throw new Error(`Unsupported responses input item type: ${itemType}`)
+                }
+                if (item.content === undefined) {
+                    throw new Error('message input item requires content')
+                }
+                let role: OpenAIMessage['role']
+                switch (item.role) {
+                    case undefined:
+                    case 'user':
+                        role = 'user'
+                        break
+                    case 'assistant':
+                        role = 'assistant'
+                        break
+                    case 'system':
+                    case 'developer':
+                        role = 'system'
+                        break
+                    default:
+                        throw new Error(`Unsupported Responses message role: ${item.role}`)
+                }
+                messages.push({
+                    role,
+                    content: convertResponseInputContent(item.content)
+                })
+            }
         }
-        if (item.arguments === undefined) {
-          throw new Error('function_call requires arguments')
+    }
+
+    const chatRequest: OpenAIChatRequest = {
+        model: request.model,
+        messages
+    }
+    if (request.temperature !== undefined) chatRequest.temperature = request.temperature
+    if (request.top_p !== undefined) chatRequest.top_p = request.top_p
+    if (request.max_output_tokens !== undefined) chatRequest.max_tokens = request.max_output_tokens
+    if (request.stream !== undefined) chatRequest.stream = request.stream
+    const tools = convertResponseTools(request.tools)
+    if (tools !== undefined) chatRequest.tools = tools
+    const toolChoice = convertResponseToolChoice(request.tool_choice)
+    if (toolChoice !== undefined) chatRequest.tool_choice = toolChoice
+    if (request.reasoning != null) {
+        if (!isResponseRecord(request.reasoning)) {
+            throw new Error('Responses reasoning must be an object')
         }
-        messages.push({
-          role: 'assistant',
-          content: '',
-          tool_calls: [{
-            id: item.call_id,
+        if (request.reasoning.encrypted_content !== undefined) {
+            throw new Error('Encrypted Responses reasoning input is not supported by this proxy')
+        }
+        if (request.reasoning.effort !== undefined) {
+            if (typeof request.reasoning.effort !== 'string') {
+                throw new Error('Responses reasoning.effort must be a string')
+            }
+            chatRequest.reasoning_effort = request.reasoning.effort
+        }
+    }
+    if (request.thinking !== undefined) chatRequest.thinking = request.thinking
+    if (request.metadata !== undefined) chatRequest.metadata = request.metadata
+    if (request.kiro_context !== undefined) chatRequest.kiro_context = request.kiro_context
+    return chatRequest
+}
+
+function isResponseRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function convertResponseTools(tools: OpenAIResponsesRequest['tools']): OpenAITool[] | undefined {
+    if (tools === undefined) return undefined
+    if (!Array.isArray(tools)) {
+        throw new Error('Responses tools must be an array')
+    }
+
+    return tools.map((rawTool, index) => {
+        const label = `Responses tool at index ${index}`
+        if (!isResponseRecord(rawTool)) {
+            throw new Error(`${label} must be an object`)
+        }
+        if (rawTool.type !== 'function') {
+            throw new Error(`${label} has unsupported type: ${String(rawTool.type)}`)
+        }
+
+        const isNestedTool = 'function' in rawTool
+        const functionDefinition = isNestedTool ? rawTool.function : rawTool
+        if (!isResponseRecord(functionDefinition)) {
+            throw new Error(`${label} function definition must be an object`)
+        }
+
+        const name = functionDefinition.name
+        if (typeof name !== 'string' || !name) {
+            throw new Error(`${label} requires a non-empty function name`)
+        }
+        const description = functionDefinition.description
+        if (description !== undefined && typeof description !== 'string') {
+            throw new Error(`${label} description must be a string`)
+        }
+        const parameters = functionDefinition.parameters
+        if (parameters !== undefined && !isResponseRecord(parameters)) {
+            throw new Error(`${label} parameters must be a JSON Schema object`)
+        }
+        const strict = functionDefinition.strict ?? rawTool.strict
+        if (strict !== undefined && typeof strict !== 'boolean') {
+            throw new Error(`${label} strict must be a boolean`)
+        }
+
+        let cacheControl: OpenAITool['cache_control']
+        if (rawTool.cache_control !== undefined) {
+            if (
+                !isResponseRecord(rawTool.cache_control) ||
+                typeof rawTool.cache_control.type !== 'string'
+            ) {
+                throw new Error(`${label} cache_control must contain a string type`)
+            }
+            cacheControl = { ...rawTool.cache_control, type: rawTool.cache_control.type }
+        }
+
+        return {
             type: 'function',
             function: {
-              name: item.name,
-              arguments: item.arguments
+                name,
+                description: description || `Tool: ${name}`,
+                parameters: parameters ?? { type: 'object', properties: {} }
+            },
+            ...(cacheControl ? { cache_control: cacheControl } : {})
+        }
+    })
+}
+
+function convertResponseInputContent(
+    content: string | OpenAIResponseContentPart[] | undefined
+): OpenAIMessage['content'] {
+    if (typeof content === 'string') return content
+    if (content === undefined) return ''
+    if (!Array.isArray(content)) {
+        throw new Error('message content must be a string or an array')
+    }
+    return content.map((part) => {
+        const partType = part.type as string
+        if (partType === 'input_image') {
+            if (!part.image_url) {
+                throw new Error('input_image requires image_url')
             }
-          }]
-        })
-      } else {
-        if (itemType !== undefined && itemType !== 'message') {
-          throw new Error(`Unsupported responses input item type: ${itemType}`)
+            return { type: 'image_url', image_url: { url: part.image_url } }
         }
-        if (item.content === undefined) {
-          throw new Error('message input item requires content')
+        if (partType === 'input_file') {
+            if (!part.file_data) {
+                throw new Error('input_file requires file_data')
+            }
+            return {
+                type: 'file',
+                file: {
+                    file_data: part.file_data,
+                    ...(part.filename !== undefined ? { filename: part.filename } : {})
+                }
+            }
         }
-        messages.push({
-          role: item.role === 'assistant' ? 'assistant' : item.role === 'system' ? 'system' : 'user',
-          content: convertResponseInputContent(item.content)
-        })
-      }
-    }
-  }
-
-  const chatRequest: OpenAIChatRequest = {
-    model: request.model,
-    messages
-  }
-  if (request.temperature !== undefined) chatRequest.temperature = request.temperature
-  if (request.top_p !== undefined) chatRequest.top_p = request.top_p
-  if (request.max_output_tokens !== undefined) chatRequest.max_tokens = request.max_output_tokens
-  if (request.stream !== undefined) chatRequest.stream = request.stream
-  if (request.tools !== undefined) chatRequest.tools = request.tools
-  const toolChoice = convertResponseToolChoice(request.tool_choice)
-  if (toolChoice !== undefined) chatRequest.tool_choice = toolChoice
-  if (request.previous_response_id !== undefined) chatRequest.conversation_id = request.previous_response_id
-  if (request.metadata !== undefined) chatRequest.metadata = request.metadata
-  if (request.kiro_context !== undefined) chatRequest.kiro_context = request.kiro_context
-  return chatRequest
+        if (partType !== 'input_text' && partType !== 'output_text') {
+            throw new Error(`Unsupported responses content part type: ${partType}`)
+        }
+        if (part.text === undefined) {
+            throw new Error(`${partType} requires text`)
+        }
+        return { type: 'text', text: part.text }
+    })
 }
 
-function convertResponseInputContent(content: string | OpenAIResponseContentPart[] | undefined): OpenAIMessage['content'] {
-  if (typeof content === 'string') return content
-  if (content === undefined) return ''
-  if (!Array.isArray(content)) {
-    throw new Error('message content must be a string or an array')
-  }
-  return content.map(part => {
-    const partType = part.type as string
-    if (partType === 'input_image') {
-      if (!part.image_url) {
-        throw new Error('input_image requires image_url')
-      }
-      return { type: 'image_url', image_url: { url: part.image_url } }
+function convertResponseToolChoice(
+    toolChoice: OpenAIResponsesRequest['tool_choice']
+): OpenAIChatRequest['tool_choice'] {
+    if (toolChoice === undefined) return undefined
+    if (typeof toolChoice === 'string') {
+        if (toolChoice === 'none' || toolChoice === 'auto' || toolChoice === 'required')
+            return toolChoice
+        throw new Error(`Unsupported Responses tool_choice: ${toolChoice}`)
     }
-    if (partType === 'input_file') {
-      if (!part.file_data) {
-        throw new Error('input_file requires file_data')
-      }
-      return {
-        type: 'file',
-        file: {
-          file_data: part.file_data,
-          ...(part.filename !== undefined ? { filename: part.filename } : {})
-        }
-      }
+    if (!isResponseRecord(toolChoice)) {
+        throw new Error('Unsupported Responses tool_choice')
     }
-    if (partType !== 'input_text' && partType !== 'output_text') {
-      throw new Error(`Unsupported responses content part type: ${partType}`)
+    if (
+        toolChoice.type === 'none' ||
+        toolChoice.type === 'auto' ||
+        toolChoice.type === 'required'
+    ) {
+        return toolChoice.type
     }
-    if (part.text === undefined) {
-      throw new Error(`${partType} requires text`)
+    if (toolChoice.type === 'function' && typeof toolChoice.name === 'string' && toolChoice.name) {
+        return { type: 'function', function: { name: toolChoice.name } }
     }
-    return { type: 'text', text: part.text }
-  })
-}
-
-function convertResponseToolChoice(toolChoice: OpenAIResponsesRequest['tool_choice']): OpenAIChatRequest['tool_choice'] {
-  if (!toolChoice || typeof toolChoice === 'string') return toolChoice
-  if (toolChoice.type === 'none' || toolChoice.type === 'auto') return toolChoice.type
-  if (toolChoice.type === 'function' && toolChoice.name) {
-    return { type: 'function', function: { name: toolChoice.name } }
-  }
-  if (toolChoice.function?.name) return { type: 'function', function: { name: toolChoice.function.name } }
-  throw new Error('Unsupported responses tool_choice')
+    if (
+        isResponseRecord(toolChoice.function) &&
+        typeof toolChoice.function.name === 'string' &&
+        toolChoice.function.name
+    ) {
+        return { type: 'function', function: { name: toolChoice.function.name } }
+    }
+    throw new Error('Unsupported responses tool_choice')
 }
 
 export function openAIChatToResponsesResponse(
-  response: OpenAIChatResponse,
-  previousResponseId?: string
+    response: OpenAIChatResponse,
+    previousResponseId?: string | null
 ): OpenAIResponsesResponse {
-  const output: OpenAIResponseOutputItem[] = response.choices.flatMap<OpenAIResponseOutputItem>(choice => {
-    if (choice.message.tool_calls?.length) {
-      return choice.message.tool_calls.map(toolCall => ({
-        type: 'function_call' as const,
-        id: `fc_${uuidv4()}`,
-        call_id: toolCall.id,
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments
-      }))
+    if (previousResponseId != null && previousResponseId.length > 0) {
+        throw new Error(
+            'Responses previous_response_id is not supported; send the conversation input explicitly'
+        )
     }
-    return [{
-      type: 'message' as const,
-      id: `msg_${uuidv4()}`,
-      role: 'assistant' as const,
-      content: [{ type: 'output_text' as const, text: choice.message.content || '' }]
-    }]
-  })
 
-  const usage: OpenAIResponsesResponse['usage'] = {
-    input_tokens: response.usage.prompt_tokens,
-    output_tokens: response.usage.completion_tokens,
-    total_tokens: response.usage.total_tokens
-  }
-  const cachedTokens = response.usage.prompt_tokens_details?.cached_tokens
-  if (cachedTokens !== undefined) {
-    usage.input_tokens_details = { cached_tokens: cachedTokens }
-  }
-  const reasoningTokens = response.usage.completion_tokens_details?.reasoning_tokens
-  if (reasoningTokens !== undefined) {
-    usage.output_tokens_details = { reasoning_tokens: reasoningTokens }
-  }
+    const output: OpenAIResponseOutputItem[] = response.choices.flatMap<OpenAIResponseOutputItem>(
+        (choice) => {
+            const toolCalls = choice.message.tool_calls ?? []
+            const items: OpenAIResponseOutputItem[] = []
+            const text = choice.message.content || ''
+            if (text || toolCalls.length === 0) {
+                items.push({
+                    type: 'message',
+                    status: 'completed',
+                    id: `msg_${uuidv4()}`,
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text }]
+                })
+            }
+            for (const toolCall of toolCalls) {
+                items.push({
+                    type: 'function_call' as const,
+                    status: 'completed',
+                    id: `fc_${uuidv4()}`,
+                    call_id: toolCall.id,
+                    name: toolCall.function.name,
+                    arguments: toolCall.function.arguments
+                })
+            }
+            return items
+        }
+    )
 
-  const responsesResponse: OpenAIResponsesResponse = {
-    id: `resp_${uuidv4()}`,
-    object: 'response',
-    created_at: response.created,
-    model: response.model,
-    output,
-    usage
-  }
-  if (previousResponseId !== undefined) {
-    responsesResponse.previous_response_id = previousResponseId
-  }
-  return responsesResponse
+    const usage: OpenAIResponsesResponse['usage'] = {
+        input_tokens: response.usage.prompt_tokens,
+        output_tokens: response.usage.completion_tokens,
+        total_tokens: response.usage.total_tokens
+    }
+    const cachedTokens = response.usage.prompt_tokens_details?.cached_tokens
+    if (cachedTokens !== undefined) {
+        usage.input_tokens_details = { cached_tokens: cachedTokens }
+    }
+    const reasoningTokens = response.usage.completion_tokens_details?.reasoning_tokens
+    if (reasoningTokens !== undefined) {
+        usage.output_tokens_details = { reasoning_tokens: reasoningTokens }
+    }
+
+    const responsesResponse: OpenAIResponsesResponse = {
+        id: `resp_${uuidv4()}`,
+        object: 'response',
+        created_at: response.created,
+        model: response.model,
+        status: 'completed',
+        error: null,
+        output,
+        usage
+    }
+    return responsesResponse
 }
 
 // ============ OpenAI -> Kiro 转换 ============
@@ -393,7 +488,8 @@ export function openaiToKiro(
       // 注意: 故意不读取 msg.reasoning_content (history 中不传给 Kiro)
       // Kiro 后端 schema 仅在响应输出中支持 assistantResponseMessage.reasoningContent，
       // 在请求 history 中传入此字段会触发 400 "Improperly formed request"
-      let assistantContent = typeof msg.content === 'string' ? msg.content : ''
+      let assistantContent = typeof msg.content === 'string' ? msg.content
+          : msg.content.filter(part => part.type === 'text').map(part => part.text || '').join('')
       if (!assistantContent.trim() && msg.tool_calls && msg.tool_calls.length > 0) {
         assistantContent = ' '
       } else if (!assistantContent.trim()) {
@@ -735,7 +831,7 @@ export function kiroToOpenaiResponse(
       index: 0,
       message: {
         role: 'assistant',
-        content: (restoredToolUses.length > 0 || !content?.trim()) ? null : content,
+        content: !content?.trim() ? null : content,
         ...(reasoningContent?.text ? { reasoning_content: reasoningContent.text } : {}),
         tool_calls: restoredToolUses.length > 0 ? restoredToolUses.map(tu => ({
           id: tu.toolUseId,
@@ -1097,7 +1193,7 @@ function extractClaudeContent(msg: ClaudeMessage): { content: string; images: Ki
         toolResults.push({
           toolUseId: block.tool_use_id,
           content: [{ text: resultContent }],
-          status: 'success'
+          status: block.is_error ? 'error' : 'success'
         })
       }
     }

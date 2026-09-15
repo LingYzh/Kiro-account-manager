@@ -51,6 +51,7 @@ interface ModelMappingRule {
   weights?: number[]
   priority: number
   apiKeyIds?: string[]
+    defaultReasoningEffort?: string
 }
 
 interface ApiKeyInfo {

@@ -23,12 +23,9 @@ export default {
     })
     const text = await r.text()
     log(`status=${r.status} bytes=${text.length}`)
-    assertTrue(r.status === 200 || r.status === 400 || r.status === 404, `responses 端点应 200 (实现) 或 404 (未实现), 实际 ${r.status}`)
-    if (r.status === 200) {
-      const json = JSON.parse(text)
-      assertTrue(json.output !== undefined || json.choices !== undefined, '应含 output 或 choices 字段')
-    } else {
-      log('Responses API 不支持或未实现, 跳过详细断言')
-    }
+    assertTrue(r.status === 200, `responses 端点应返回 200，实际 ${r.status}: ${text}`)
+    const json = JSON.parse(text)
+    assertTrue(Array.isArray(json.output), '应含 Responses output 数组')
+    assertTrue(json.status === 'completed', '响应必须完成')
   }
 }

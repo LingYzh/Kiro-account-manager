@@ -103,7 +103,7 @@ Sync Kiro IDE settings, edit MCP servers, manage user rules (Steering).
 ![Kiro Settings](Kiro-account-manager/resources/Kiro%20设置.png)
 
 ### About
-View version info, feature list, tech stack and author info.
+View version info, feature list, tech stack and original upstream author info.
 
 ![About](Kiro-account-manager/resources/关于.png)
 
@@ -1269,10 +1269,10 @@ This project is licensed under the [AGPL-3.0 License](LICENSE).
 
 ---
 
-## 👨‍💻 Author
+## 👨‍💻 Original Upstream Author
 
 - **GitHub**: [chaogei](https://github.com/chaogei)
-- **Project Homepage**: [Kiro-account-manager](https://github.com/chaogei/Kiro-account-manager)
+- **Upstream Project**: [Kiro-account-manager](https://github.com/chaogei/Kiro-account-manager)
 
 ---
 

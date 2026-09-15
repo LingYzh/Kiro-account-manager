@@ -20,6 +20,7 @@
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
+    "test:compat": "node test/compat-capabilities.mjs && node test/compat-responses.mjs && node test/compat-eventstream.mjs && node test/e2e-fullsuite/compatibility.mjs",
     "test:e2e": "node test/e2e-fullsuite/run.mjs",
     "test:e2e:only": "node test/e2e-fullsuite/run.mjs --only"
   },

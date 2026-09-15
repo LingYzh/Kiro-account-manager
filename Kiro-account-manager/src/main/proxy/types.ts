@@ -105,58 +105,95 @@ export interface OpenAIStreamChunk {
 }
 
 export interface OpenAIResponsesRequest {
-  model: string
-  input: string | OpenAIResponseInputItem[]
-  instructions?: string
-  temperature?: number
-  top_p?: number
-  max_output_tokens?: number
-  stream?: boolean
-  tools?: OpenAITool[]
-  tool_choice?: string | { type: string; name?: string; function?: { name: string } }
-  previous_response_id?: string
-  reasoning?: unknown
-  metadata?: Record<string, unknown>
-  kiro_context?: KiroRequestContext
+    model: string
+    input: string | OpenAIResponseInputItem[]
+    instructions?: string
+    temperature?: number
+    top_p?: number
+    max_output_tokens?: number
+    stream?: boolean
+    tools?: OpenAIResponsesTool[]
+    tool_choice?: string | { type: string; name?: string; function?: { name: string } }
+    previous_response_id?: string | null
+    reasoning?: OpenAIResponsesReasoning | null
+    thinking?:
+        | { type: 'enabled'; budget_tokens?: number }
+        | { type: 'adaptive'; display?: string }
+        | { type: 'disabled' }
+    metadata?: Record<string, unknown>
+    kiro_context?: KiroRequestContext
+}
+
+export interface OpenAIResponsesFunctionTool {
+    type: 'function'
+    name: string
+    description?: string
+    parameters?: unknown
+    strict?: boolean
+}
+
+export type OpenAIResponsesTool = OpenAIResponsesFunctionTool | OpenAITool
+
+export interface OpenAIResponsesReasoning {
+    effort?: string
+    encrypted_content?: string
+    [key: string]: unknown
 }
 
 export interface OpenAIResponseInputItem {
-  type?: 'message' | 'function_call' | 'function_call_output'
-  role?: 'system' | 'user' | 'assistant' | 'tool'
-  content?: string | OpenAIResponseContentPart[]
-  call_id?: string
-  name?: string
-  arguments?: string
-  output?: string
+    type?: 'message' | 'function_call' | 'function_call_output' | 'reasoning'
+    role?: 'system' | 'developer' | 'user' | 'assistant' | 'tool'
+    content?: string | OpenAIResponseContentPart[]
+    call_id?: string
+    name?: string
+    arguments?: string
+    output?: string | OpenAIResponseContentPart[]
+    encrypted_content?: string
+    summary?: unknown
 }
 
 export interface OpenAIResponseContentPart {
-  type: 'input_text' | 'output_text' | 'input_image' | 'input_file'
-  text?: string
-  image_url?: string
-  file_data?: string
-  filename?: string
+    type: 'input_text' | 'output_text' | 'input_image' | 'input_file'
+    text?: string
+    image_url?: string
+    file_data?: string
+    filename?: string
 }
 
 export interface OpenAIResponsesResponse {
-  id: string
-  object: 'response'
-  created_at: number
-  model: string
-  output: OpenAIResponseOutputItem[]
-  previous_response_id?: string
-  usage: {
-    input_tokens: number
-    output_tokens: number
-    total_tokens: number
-    input_tokens_details?: { cached_tokens?: number }
-    output_tokens_details?: { reasoning_tokens?: number }
-  }
+    id: string
+    object: 'response'
+    created_at: number
+    model: string
+    status?: 'completed' | 'failed' | 'in_progress'
+    error?: { type?: string; message: string } | null
+    output: OpenAIResponseOutputItem[]
+    previous_response_id?: string
+    usage: {
+        input_tokens: number
+        output_tokens: number
+        total_tokens: number
+        input_tokens_details?: { cached_tokens?: number }
+        output_tokens_details?: { reasoning_tokens?: number }
+    }
 }
 
 export type OpenAIResponseOutputItem =
-  | { type: 'message'; id: string; role: 'assistant'; content: { type: 'output_text'; text: string }[] }
-  | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
+    | {
+          type: 'message'
+          id: string
+          role: 'assistant'
+          content: { type: 'output_text'; text: string }[]
+          status?: 'completed' | 'in_progress' | 'incomplete'
+      }
+    | {
+          type: 'function_call'
+          id: string
+          call_id: string
+          name: string
+          arguments: string
+          status?: 'completed' | 'in_progress' | 'incomplete'
+      }
 
 // ============ Claude 兼容格式 ============
 export interface ClaudeRequest {
@@ -201,6 +238,7 @@ export interface ClaudeContentBlock {
   name?: string
   input?: unknown
   tool_use_id?: string
+    is_error?: boolean
   content?: string | ClaudeContentBlock[]
   cache_control?: ClaudeCacheControl
 }
@@ -480,6 +518,8 @@ export interface ModelMappingRule {
   priority: number
   // 适用的 API Key ID 列表（空表示全局）
   apiKeyIds?: string[]
+    // 客户端未指定推理参数时的默认等级；未配置时沿用上游
+    defaultReasoningEffort?: string
 }
 
 export interface ProxyConfig {

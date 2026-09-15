@@ -13,6 +13,7 @@ interface ModelMappingRule {
   weights?: number[]
   priority: number
   apiKeyIds?: string[]
+    defaultReasoningEffort?: string
 }
 
 interface ApiKey {
@@ -317,6 +318,30 @@ export function ModelMappingDialog({
                             <option value="loadbalance">{isEn ? 'Load Balance - Random selection' : '负载均衡 - 随机选择'}</option>
                           </select>
                         </div>
+                      </div>
+
+                      <div className="space-y-2">
+                          <div>
+                              <Label>{isEn ? 'Default Reasoning Effort' : '默认推理等级'}</Label>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                  {isEn
+                                      ? 'Used only when the client does not specify reasoning settings; the target model capability still applies.'
+                                      : '仅在客户端未指定推理参数时使用，最终受目标模型能力约束。'}
+                              </p>
+                          </div>
+                          <select
+                              className="w-full h-10 px-3 py-2 text-sm rounded-xl border border-input bg-background ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+                              value={rule.defaultReasoningEffort ?? ''}
+                              onChange={(e) => updateRule(rule.id, { defaultReasoningEffort: e.target.value || undefined })}
+                          >
+                              <option value="">{isEn ? 'Upstream default' : '上游默认'}</option>
+                              <option value="none">{isEn ? 'None' : '无'}</option>
+                              <option value="low">{isEn ? 'Low' : '低'}</option>
+                              <option value="medium">{isEn ? 'Medium' : '中'}</option>
+                              <option value="high">{isEn ? 'High' : '高'}</option>
+                              <option value="xhigh">{isEn ? 'XHigh' : '极高'}</option>
+                              <option value="max">{isEn ? 'Max' : '最大'}</option>
+                          </select>
                       </div>
 
                       <div className="space-y-2">

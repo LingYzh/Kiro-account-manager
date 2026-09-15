@@ -103,7 +103,7 @@
 ![Kiro 设置](Kiro-account-manager/resources/Kiro%20设置.png)
 
 ### 关于
-查看版本信息、功能列表、技术栈和作者信息。
+查看版本信息、功能列表、技术栈和上游原作者信息。
 
 ![关于](Kiro-account-manager/resources/关于.png)
 
@@ -1272,10 +1272,10 @@ npx electron-builder --linux --arm64
 
 ---
 
-## 👨‍💻 作者
+## 👨‍💻 上游原作者
 
 - **GitHub**: [chaogei](https://github.com/chaogei)
-- **项目主页**: [Kiro-account-manager](https://github.com/chaogei/Kiro-account-manager)
+- **上游项目**: [Kiro-account-manager](https://github.com/chaogei/Kiro-account-manager)
 
 ---
 

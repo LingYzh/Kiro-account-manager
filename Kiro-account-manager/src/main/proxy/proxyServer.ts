@@ -18,14 +18,14 @@ import type {
   TokenRefreshCallback
 } from './types'
 import { AccountPool, ErrorType, classifyError } from './accountPool'
-import { callKiroApiStream, callKiroApi, fetchKiroModels, setModelContextWindow, type KiroModel } from './kiroApi'
+import { callKiroApiStream, callKiroApi, getCachedKiroModels, resolveKiroModel, clearModelMetadataCache, isModelMetadataCached, type KiroModel } from './kiroApi'
+import { extractThinkingSchema, getThinkingConfig as parseThinkingConfig, type ThinkingConfig } from './modelCapabilities'
 import { proxyLogger } from './logger'
 import { getKProxyService, generateDeviceId } from '../kproxy'
 import {
   openaiToKiro,
   claudeToKiro,
   kiroToOpenaiResponse,
-  type ThinkingConfig,
   kiroToClaudeResponse,
   createOpenaiStreamChunk,
   createClaudeStreamEvent,
@@ -33,6 +33,7 @@ import {
   openAIChatToResponsesResponse
 } from './translator'
 import { ToolNameRegistry } from './toolNameRegistry'
+import { ResponsesStream } from './responsesStream'
 import { promptCacheTracker } from './promptCacheTracker'
 import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument } from './steeringLoader'
 
@@ -151,29 +152,6 @@ function modelCapabilityMap(modalities: ModelModality[]): Record<ModelModality, 
   }
 }
 
-function extractThinkingSchema(schema?: Record<string, unknown> | null): { efforts?: string[]; schemaPath?: 'output_config' | 'reasoning' } | undefined {
-  if (!schema) return undefined
-  const props = schema.properties as Record<string, unknown> | undefined
-  if (!props) return undefined
-  // output_config 路径（Claude 4.6+ 新模型）
-  if (props.output_config) {
-    const effortField = (props.output_config as Record<string, unknown>)?.properties as Record<string, unknown> | undefined
-    const effortEnum = (effortField?.effort as Record<string, unknown> | undefined)?.enum as string[] | undefined
-    if (effortEnum && effortEnum.length > 0) {
-      return { efforts: effortEnum, schemaPath: 'output_config' }
-    }
-  }
-  // reasoning 路径（备用）
-  if (props.reasoning) {
-    const reasoningProps = (props.reasoning as Record<string, unknown>)?.properties as Record<string, unknown> | undefined
-    const effortEnum = (reasoningProps?.effort as Record<string, unknown> | undefined)?.enum as string[] | undefined
-    if (effortEnum && effortEnum.length > 0) {
-      return { efforts: effortEnum, schemaPath: 'reasoning' }
-    }
-  }
-  return undefined
-}
-
 function buildClientModel(input: {
   id: string
   created: number
@@ -194,10 +172,9 @@ function buildClientModel(input: {
   const outputModalities: ModelModality[] = ['text']
   const output = modelOutputLimit(input.id, input.maxOutputTokens)
   const context = typeof input.maxInputTokens === 'number' && input.maxInputTokens > 0 ? input.maxInputTokens : 200000
-  const schemaProps = input.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined
   const thinkingSchema = extractThinkingSchema(input.additionalModelRequestFieldsSchema)
-  const hasVisibleThinking = !!schemaProps?.thinking || !!schemaProps?.output_config
-  const reasoning = hasVisibleThinking || thinkingSchema?.schemaPath === 'reasoning'
+  const hasVisibleThinking = !!thinkingSchema?.supportsThinking
+  const reasoning = hasVisibleThinking || !!thinkingSchema?.schemaPath
   // GPT-5.6 等 reasoning.effort 模型使用隐藏 CoT；支持 reasoning 不代表会返回 reasoning_content。
   const interleaved = hasVisibleThinking ? { field: 'reasoning_content' as const } : false
 
@@ -270,6 +247,8 @@ export class ProxyServer {
   private isHttps: boolean = false
   private isStopping: boolean = false
   private activeRequests: Set<AbortController> = new Set()
+    private requestDiagnostics = new WeakMap<http.ServerResponse, { id: string; startedAt: number }>()
+
   private sockets: Set<Socket> = new Set()
   /** P1-7 按 API Key/IP 的滑动窗口限流（每分钟桶） */
   private rateLimitBuckets: Map<string, { count: number; windowStart: number }> = new Map()
@@ -1037,19 +1016,14 @@ export class ProxyServer {
 
   // 清除模型缓存，强制下次请求重新获取
   clearModelCache(): void {
-    this.modelCache = null
+    clearModelMetadataCache()
     console.log('[ProxyServer] Model cache cleared')
   }
 
-  // 从模型缓存查找指定模型的 thinking 配置
-  private getThinkingConfig(modelId: string): ThinkingConfig | undefined {
-    if (!this.modelCache) return undefined
-    const lower = modelId.toLowerCase()
-    const model = this.modelCache.models.find(m => m.modelId.toLowerCase() === lower)
-    if (!model) return undefined
-    const schema = extractThinkingSchema(model.additionalModelRequestFieldsSchema)
-    if (!schema?.schemaPath || !schema.efforts?.length) return undefined
-    return { schemaPath: schema.schemaPath, efforts: schema.efforts }
+  // 与实际请求使用同一账号、区域和 profile 的目录，冷启动也先加载能力。
+  private async getThinkingConfig(account: ProxyAccount, modelId: string, signal?: AbortSignal): Promise<ThinkingConfig> {
+    const { model } = await resolveKiroModel(account, modelId, signal)
+    return parseThinkingConfig(model)
   }
 
   // 获取可用模型列表
@@ -1063,7 +1037,7 @@ export class ProxyServer {
       maxOutputTokens: m.tokenLimits?.maxOutputTokens,
       rateMultiplier: m.rateMultiplier,
       rateUnit: m.rateUnit,
-      supportsThinking: !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.thinking || !!(m.additionalModelRequestFieldsSchema?.properties as Record<string, unknown> | undefined)?.output_config || extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.schemaPath === 'reasoning',
+      supportsThinking: parseThinkingConfig(m).state === 'supported',
       thinkingEfforts: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.efforts,
       thinkingSchemaPath: extractThinkingSchema(m.additionalModelRequestFieldsSchema)?.schemaPath,
       supportsPromptCaching: m.promptCaching?.supportsPromptCaching || false,
@@ -1072,39 +1046,11 @@ export class ProxyServer {
   }
 
   async getAvailableModels(signal?: AbortSignal): Promise<{ models: ReturnType<typeof ProxyServer.mapKiroModelToApi>[]; fromCache: boolean }> {
-    const now = Date.now()
-    
-    let kiroModels: KiroModel[]
-    let fromCache = false
-
-    if (this.modelCache && (now - this.modelCache.timestamp) < this.MODEL_CACHE_TTL) {
-      kiroModels = this.modelCache.models
-      fromCache = true
-    } else {
-      this.throwIfAborted(signal)
-      const account = await this.getAvailableAccount(signal)
-      this.throwIfAborted(signal)
-      if (!account) {
-        return { models: [], fromCache: false }
-      }
-
-      try {
-        kiroModels = await fetchKiroModels(account, signal)
-        if (kiroModels.length > 0) {
-          this.modelCache = { models: kiroModels, timestamp: now }
-          // 同步到 kiroApi 的 ctx cache, 供 token 裁剪逻辑使用
-          for (const m of kiroModels) {
-            if (m.tokenLimits?.maxInputTokens) {
-              setModelContextWindow(m.modelId, m.tokenLimits.maxInputTokens)
-            }
-          }
-        }
-      } catch (error) {
-        if (this.isAbortError(error, signal)) throw error
-        console.error('[ProxyServer] Failed to fetch models:', error)
-        return { models: [], fromCache: false }
-      }
-    }
+    this.throwIfAborted(signal)
+    const account = await this.getAvailableAccount(signal)
+    if (!account) return { models: [], fromCache: false }
+    const fromCache = isModelMetadataCached(account)
+    const kiroModels = await getCachedKiroModels(account, signal)
 
     // 合并隐藏模型（与 /v1/models 端点一致）
     const modelIds = new Set(kiroModels.map(m => m.modelId))
@@ -1353,7 +1299,8 @@ export class ProxyServer {
     account: ProxyAccount,
     apiCall: (acc: ProxyAccount, endpointIndex: number) => Promise<T>,
     _path: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    canRetry: () => boolean = () => true
   ): Promise<{ result: T; account: ProxyAccount }> {
     const maxRetries = this.config.maxRetries || 3
     const retryDelay = this.config.retryDelayMs || 1000
@@ -1382,8 +1329,13 @@ export class ProxyServer {
         if (this.isAbortError(error, signal)) throw error
         lastError = error as Error
         const errMsg = lastError.message || ''
+        // SSE 已交付正文后禁止重新生成，避免客户端收到两份回答。
+        if (!canRetry()) throw error
 
         console.log(`[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): ${errMsg}`)
+
+        // 在配额/认证关键字之前判断请求错误，防止错误正文误触发切号。
+        if (/API error (400|422):|INVALID_MODEL_ID|REQUEST_BODY_INVALID/.test(errMsg)) break
 
         // 优先检测账号被长期封禁（不是 token 问题，刷新也没用）
         // 特征：HTTP 403 + reason: "TEMPORARILY_SUSPENDED" 或 AccountSuspendedException / 423
@@ -1733,7 +1685,12 @@ export class ProxyServer {
   }
 
   // 应用模型映射
-  private applyModelMapping(requestedModel: string, apiKeyId?: string): string {
+  private applyModelMapping(
+    requestedModel: string,
+    apiKeyId?: string,
+    request?: { thinking?: unknown; reasoning_effort?: string; output_config?: { effort?: string } },
+    claudeProtocol = false
+  ): string {
     const mappings = this.config.modelMappings
     if (!mappings || mappings.length === 0) return requestedModel
 
@@ -1745,8 +1702,8 @@ export class ProxyServer {
       if (!rule.enabled) continue
 
       // 检查是否适用于当前 API Key
-      if (rule.apiKeyIds && rule.apiKeyIds.length > 0 && apiKeyId) {
-        if (!rule.apiKeyIds.includes(apiKeyId)) continue
+      if (rule.apiKeyIds && rule.apiKeyIds.length > 0) {
+        if (!apiKeyId || !rule.apiKeyIds.includes(apiKeyId)) continue
       }
 
       // 检查源模型是否匹配（支持通配符 *）
@@ -1779,6 +1736,17 @@ export class ProxyServer {
         targetModel = validTargets[0]
       }
 
+      // Apply a fallback only when the client supplied no reasoning controls,
+      // including an explicit disabled thinking setting. Target schema validation
+      // still happens when translating the selected model's request.
+      if (request && rule.defaultReasoningEffort && request.thinking == null
+          && request.reasoning_effort == null && request.output_config?.effort == null) {
+          if (claudeProtocol) {
+              request.output_config = { ...request.output_config, effort: rule.defaultReasoningEffort }
+          } else {
+              request.reasoning_effort = rule.defaultReasoningEffort
+          }
+      }
       proxyLogger.info('ProxyServer', `Model mapping applied: ${requestedModel} -> ${targetModel} (rule: ${rule.name}, type: ${rule.type})`)
       return targetModel
     }
@@ -1786,11 +1754,35 @@ export class ProxyServer {
     return requestedModel
   }
 
+    // Log protocol milestones without prompts, tool arguments or tool results.
+    private logRequestMilestone(res: http.ServerResponse, message: string, data: Record<string, unknown> = {}): void {
+        if (!this.config.logRequests) return
+        const context = this.requestDiagnostics.get(res)
+        proxyLogger.info('ProxyServer', message, {
+            requestId: context?.id,
+            timestamp: new Date().toISOString(),
+            elapsedMs: context ? Date.now() - context.startedAt : undefined,
+            ...data
+        })
+    }
+
   // 处理请求
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const path = req.url || '/'
     const method = req.method || 'GET'
     const clientIP = this.getClientIP(req)
+    this.requestDiagnostics.set(res, { id: uuidv4(), startedAt: Date.now() })
+    // finish means Node handed the response to the transport, not that the
+    // client executed the tool. Keep this distinct from the adapter completion.
+    res.once('finish', () => this.logRequestMilestone(res, 'HTTP response finished', { method, path, status: res.statusCode }))
+    res.once('close', () => {
+        if (!res.writableFinished) {
+            this.logRequestMilestone(res, 'HTTP response closed before finish', {
+                method, path, status: res.statusCode, headersSent: res.headersSent,
+                endCalled: res.writableEnded, serverStopping: this.isStopping
+            })
+        }
+    })
     const controller = new AbortController()
     const abortRequest = () => {
       if (!this.isStopping && res.writableEnded) return
@@ -1854,7 +1846,7 @@ export class ProxyServer {
 
       // 记录请求
       if (this.config.logRequests) {
-        proxyLogger.info('ProxyServer', `${method} ${path}`)
+        this.logRequestMilestone(res, `${method} ${path}`)
       }
 
       // 路由（移除查询参数）
@@ -2247,7 +2239,7 @@ export class ProxyServer {
 
     try {
       const toolNameRegistry = new ToolNameRegistry()
-      const kiroPayload = openaiToKiro(openaiRequest, account.profileArn, toolNameRegistry, this.getThinkingConfig(openaiRequest.model))
+      const kiroPayload = openaiToKiro(openaiRequest, account.profileArn, toolNameRegistry, await this.getThinkingConfig(account, openaiRequest.model, signal))
 
       if (isStream) {
         // SSE 流式
@@ -2317,10 +2309,6 @@ export class ProxyServer {
       this.handleApiError(res, account, error as Error, '/v1beta', modelId, startTime, signal)
     }
   }
-
-  // 模型列表缓存
-  private modelCache: { models: KiroModel[]; timestamp: number } | null = null
-  private readonly MODEL_CACHE_TTL = 5 * 60 * 1000 // 5 分钟缓存
 
   // Steering 文件缓存（从 config.workspacePath 加载）
   private steeringDocs: SteeringDocument[] = []
@@ -2405,31 +2393,8 @@ export class ProxyServer {
     // 尝试从 Kiro API 获取动态模型
     let kiroModels: KiroModel[] = []
     
-    // 检查缓存
-    if (this.modelCache && (now - this.modelCache.timestamp) < this.MODEL_CACHE_TTL) {
-      kiroModels = this.modelCache.models
-    } else {
-      // 获取一个可用账号来请求模型列表
-      const account = this.accountPool.getNextAccount()
-      if (account) {
-        try {
-          kiroModels = await fetchKiroModels(account, signal)
-          if (kiroModels.length > 0) {
-            this.modelCache = { models: kiroModels, timestamp: now }
-            // 同步到 kiroApi 的 ctx cache, 供 token 裁剪逻辑使用
-            for (const m of kiroModels) {
-              if (m.tokenLimits?.maxInputTokens) {
-                setModelContextWindow(m.modelId, m.tokenLimits.maxInputTokens)
-              }
-            }
-            proxyLogger.info('ProxyServer', `Fetched ${kiroModels.length} models from Kiro API`)
-          }
-        } catch (error) {
-          if (this.isAbortError(error, signal)) throw error
-          console.error('[ProxyServer] Failed to fetch Kiro models:', error)
-        }
-      }
-    }
+    const account = await this.getAvailableAccount(signal)
+    if (account) kiroModels = await getCachedKiroModels(account, signal)
 
     // 转换 Kiro 模型为 OpenAI 格式（保持原始 modelId）
     const dynamicModels = kiroModels.map(m => buildClientModel({
@@ -2499,7 +2464,7 @@ export class ProxyServer {
     const affinityHintChat = request.conversation_id
 
     // 应用模型映射
-    request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
+    request.model = this.applyModelMapping(request.model, matchedApiKey?.id, request)
 
     const startTime = Date.now()
 
@@ -2546,7 +2511,7 @@ export class ProxyServer {
       }
 
       // 转换为 Kiro 格式
-      const thinkingConfig = this.getThinkingConfig(processedRequest.model)
+      const thinkingConfig = await this.getThinkingConfig(account, processedRequest.model, signal)
       const kiroPayload = openaiToKiro(processedRequest, account.profileArn, toolNameRegistry, thinkingConfig)
 
       // 记录请求详情到日志
@@ -2576,7 +2541,7 @@ export class ProxyServer {
         const { result, account: usedAccount } = await this.callWithRetry(
           account,
           async (acc) => {
-            const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, thinkingConfig)
+            const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal))
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/chat/completions',
@@ -2628,7 +2593,7 @@ export class ProxyServer {
         const keyPrefix = matchedApiKey?.id?.slice(0, 8) || 'default'
         affinityHintResp = `${keyPrefix}:${rawHintResp}`
       }
-      chatRequest.model = this.applyModelMapping(chatRequest.model, matchedApiKey?.id)
+      chatRequest.model = this.applyModelMapping(chatRequest.model, matchedApiKey?.id, chatRequest)
       processedRequest = await this.resolveOpenAIHttpImages(this.prepareOpenAIRequest(chatRequest), signal)
     } catch (error) {
       if (this.isAbortError(error, signal)) return
@@ -2665,45 +2630,53 @@ export class ProxyServer {
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive'
         })
-        const responseId = `resp_${uuidv4()}`
-        res.write(`event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: chatRequest.model, output: [] } })}\n\n`)
-        const { result, account: usedAccount } = await this.callWithRetry(
-          account,
-          async (acc) => {
-            const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, this.getThinkingConfig(processedRequest.model))
-            return callKiroApi(acc, retryPayload, signal)
-          },
-          '/v1/responses',
-          signal
-        )
-        const chatResponse = kiroToOpenaiResponse(result.content, result.toolUses, result.usage, chatRequest.model, toolNameRegistry, result.reasoningContent)
-        this.throwIfResponseClosed(res, signal)
-        const response = openAIChatToResponsesResponse(chatResponse, responseRequest.previous_response_id)
-        const streamedResponse = { ...response, id: responseId }
-        streamedResponse.output.forEach((item, outputIndex) => {
-          this.throwIfResponseClosed(res, signal)
-          res.write(`event: response.output_item.added\ndata: ${JSON.stringify({ type: 'response.output_item.added', output_index: outputIndex, item })}\n\n`)
-          if (item.type === 'message') {
-            item.content.forEach((part, contentIndex) => {
-              this.throwIfResponseClosed(res, signal)
-              res.write(`event: response.content_part.added\ndata: ${JSON.stringify({ type: 'response.content_part.added', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part: { type: part.type, text: '' } })}\n\n`)
-              if (part.text) {
-                res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.text })}\n\n`)
-              }
-              res.write(`event: response.output_text.done\ndata: ${JSON.stringify({ type: 'response.output_text.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, text: part.text })}\n\n`)
-              res.write(`event: response.content_part.done\ndata: ${JSON.stringify({ type: 'response.content_part.done', item_id: item.id, output_index: outputIndex, content_index: contentIndex, part })}\n\n`)
-            })
-          } else {
-            if (item.arguments) {
-              res.write(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.delta', item_id: item.id, output_index: outputIndex, delta: item.arguments })}\n\n`)
-            }
-            res.write(`event: response.function_call_arguments.done\ndata: ${JSON.stringify({ type: 'response.function_call_arguments.done', item_id: item.id, output_index: outputIndex, arguments: item.arguments })}\n\n`)
-          }
-          this.throwIfResponseClosed(res, signal)
-          res.write(`event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', output_index: outputIndex, item })}\n\n`)
+        const stream = new ResponsesStream(chatRequest.model, event => {
+            this.throwIfResponseClosed(res, signal)
+            res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
         })
-        this.throwIfResponseClosed(res, signal)
-        res.write(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: streamedResponse })}\n\n`)
+        stream.start()
+        let hasEmittedClientData = false
+        let streamResult: { result: { usage: import('./types').KiroUsage }; account: ProxyAccount }
+        try {
+            streamResult = await this.callWithRetry(
+                account,
+                async (acc) => {
+                    const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal))
+                    let usage: import('./types').KiroUsage | undefined
+                    let streamError: Error | undefined
+                    await callKiroApiStream(acc, retryPayload, (text, toolUse, isThinking) => {
+                        this.throwIfResponseClosed(res, signal)
+                        if (!isThinking && text) {
+                            hasEmittedClientData = true
+                            stream.text(text)
+                        }
+                        if (toolUse) {
+                            hasEmittedClientData = true
+                            stream.tool({ ...toolNameRegistry.restoreToolUse(toolUse), stop: true })
+                        }
+                        return this.waitForDrain(res)
+                    }, value => { usage = value }, error => { streamError = error }, signal, this.config.preferredEndpoint)
+                    if (streamError) throw streamError
+                    if (!usage) throw new Error('Upstream stream ended without completion')
+                    return { usage }
+                },
+                '/v1/responses',
+                signal,
+                () => !hasEmittedClientData
+            )
+        } catch (error) {
+            if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
+                const message = error instanceof Error ? error.message : 'Upstream stream failed'
+                stream.fail(message)
+                res.end()
+                this.recordRequestFailed()
+                this.events.onResponse?.({ path: '/v1/responses', model: chatRequest.model, status: 500, error: message })
+                this.recordRequest({ path: '/v1/responses', model: chatRequest.model, responseTime: Date.now() - startTime, success: false, error: message })
+            }
+            return
+        }
+        const { result, account: usedAccount } = streamResult
+        stream.complete(result.usage)
         res.end()
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
@@ -2722,7 +2695,7 @@ export class ProxyServer {
       const { result, account: usedAccount } = await this.callWithRetry(
         account,
         async (acc) => {
-          const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, this.getThinkingConfig(processedRequest.model))
+          const retryPayload = openaiToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal))
           return callKiroApi(acc, retryPayload, signal)
         },
         '/v1/responses',
@@ -2789,7 +2762,7 @@ export class ProxyServer {
         kiroPayload,
         (text, toolUse, isThinking) => {
           if (signal?.aborted || this.isResponseClosed(res)) return
-          if (text && text.trim()) {
+          if (text) {
             if (isThinking) {
               // 原生 thinking 内容 → 输出为 reasoning_content
               const chunk = createOpenaiStreamChunk(id, model, { reasoning_content: text })
@@ -2911,6 +2884,19 @@ export class ProxyServer {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
     const request: ClaudeRequest = JSON.parse(body)
+    this.logRequestMilestone(res, 'Claude request received', {
+        model: request.model,
+        stream: !!request.stream,
+        messageCount: request.messages?.length,
+        toolChoice: request.tool_choice?.type,
+        toolCount: request.tools?.length || 0,
+        lastMessageBlocks: Array.isArray(request.messages?.at(-1)?.content)
+            ? (request.messages.at(-1)!.content as import('./types').ClaudeContentBlock[]).map(block => ({
+                type: block.type,
+                ...(block.type === 'tool_result' ? { toolUseId: block.tool_use_id, isError: block.is_error === true } : {})
+            }))
+            : [{ type: 'text' }]
+    })
     const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
 
     // 提取 session hint（用于稳定 conversationId），拼入 API Key hash 隔离不同用户
@@ -2923,7 +2909,7 @@ export class ProxyServer {
     const affinityHint = request.conversation_id
 
     // 应用模型映射
-    request.model = this.applyModelMapping(request.model, matchedApiKey?.id)
+    request.model = this.applyModelMapping(request.model, matchedApiKey?.id, request, true)
 
     const startTime = Date.now()
 
@@ -2969,7 +2955,7 @@ export class ProxyServer {
         processedRequest.system = this.injectSteeringClaude(processedRequest.system) as string | undefined
       }
 
-      const claudeThinkingConfig = this.getThinkingConfig(processedRequest.model)
+      const claudeThinkingConfig = await this.getThinkingConfig(account, processedRequest.model, signal)
       const kiroPayload = claudeToKiro(processedRequest, account.profileArn, toolNameRegistry, claudeThinkingConfig)
 
       // 构建 prompt cache profile（用于模拟缓存 usage）
@@ -2998,6 +2984,8 @@ export class ProxyServer {
         proxyLogger.info('ProxyServer', `Claude API: ${request.model}`, {
           model: request.model,
           stream: request.stream,
+          reasoningCapability: claudeThinkingConfig.state,
+          requestedEffort: processedRequest.output_config?.effort,
           contentLength,
           toolsCount,
           historyLength,
@@ -3015,13 +3003,23 @@ export class ProxyServer {
         const { result, account: usedAccount } = await this.callWithRetry(
           account,
           async (acc) => {
-            const retryPayload = claudeToKiro(processedRequest, acc.profileArn, toolNameRegistry, claudeThinkingConfig)
+            const retryPayload = claudeToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal))
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/messages',
           signal
         )
         const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
+        if (this.config.logRequests) {
+            this.logRequestMilestone(res, 'Claude response completed', {
+                model: request.model,
+                stream: false,
+                blockTypes: response.content.map(block => block.type),
+                tools: response.content.filter(block => block.type === 'tool_use').map(block => ({ id: block.id, name: block.name })),
+                stopReason: response.stop_reason,
+                textLength: result.content.length
+            })
+        }
 
         // 用缓存模拟的 usage 覆盖（如果有 cache profile）
         if (cacheProfile && cacheUsage) {
@@ -3078,6 +3076,7 @@ export class ProxyServer {
     let hasStartedThinkingBlock = false
     let pendingThinkingSignature: string | undefined
     let collectedContent = ''
+    const blockTypes: string[] = []
     const pendingToolCalls: Map<string, { name: string; input: Record<string, unknown> }> = new Map()
 
     const flushThinkingSignature = () => {
@@ -3135,13 +3134,14 @@ export class ProxyServer {
               index: currentBlockIndex,
               content_block: { type: 'redacted_thinking', data: redactedContent }
             })
+            blockTypes.push('redacted_thinking')
             res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(blockStop)}\n\n`)
             currentBlockIndex++
             return this.waitForDrain(res)
           }
-          if (text && text.trim()) {
+          if (text) {
             if (isThinking) {
               // 原生 thinking 内容 → 输出为 Anthropic thinking block
               if (hasStartedTextBlock) {
@@ -3157,6 +3157,7 @@ export class ProxyServer {
                 })
                 res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
                 hasStartedThinkingBlock = true
+                blockTypes.push('thinking')
               }
               const delta = createClaudeStreamEvent('content_block_delta', {
                 index: currentBlockIndex,
@@ -3183,6 +3184,7 @@ export class ProxyServer {
                 })
                 res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
                 hasStartedTextBlock = true
+                blockTypes.push('text')
               }
               const delta = createClaudeStreamEvent('content_block_delta', {
                 index: currentBlockIndex,
@@ -3191,15 +3193,9 @@ export class ProxyServer {
               res.write(`event: content_block_delta\ndata: ${JSON.stringify(delta)}\n\n`)
             }
           } else if (isThinking && reasoningSignature) {
-            if (!hasStartedThinkingBlock) {
-              const blockStart = createClaudeStreamEvent('content_block_start', {
-                index: currentBlockIndex,
-                content_block: { type: 'thinking', thinking: '' }
-              })
-              res.write(`event: content_block_start\ndata: ${JSON.stringify(blockStart)}\n\n`)
-              hasStartedThinkingBlock = true
-            }
-            pendingThinkingSignature = reasoningSignature
+            // A signature alone is metadata, not a visible thinking block.
+            // Opening one here also reuses an active text block's index.
+            if (hasStartedThinkingBlock) pendingThinkingSignature = reasoningSignature
           }
           if (toolUse) {
             const restoredToolUse = toolNameRegistry.restoreToolUse(toolUse)
@@ -3235,6 +3231,11 @@ export class ProxyServer {
             const toolBlockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
             res.write(`event: content_block_stop\ndata: ${JSON.stringify(toolBlockStop)}\n\n`)
             currentBlockIndex++
+            blockTypes.push('tool_use')
+            this.logRequestMilestone(res, 'Claude tool emitted', {
+                messageId: id, index: currentBlockIndex - 1,
+                toolUseId: restoredToolUse.toolUseId, name: restoredToolUse.name
+            })
           }
           return this.waitForDrain(res)
         },
@@ -3292,6 +3293,17 @@ export class ProxyServer {
           // 发送 message_stop
           const messageStop = createClaudeStreamEvent('message_stop')
           res.write(`event: message_stop\ndata: ${JSON.stringify(messageStop)}\n\n`)
+          if (this.config.logRequests) {
+              this.logRequestMilestone(res, 'Claude response completed', {
+                  model,
+                  messageId: id,
+                  stream: true,
+                  stopReason,
+                  blockCount: currentBlockIndex,
+                  blockTypes,
+                  textLength: collectedContent.length
+              })
+          }
           res.end()
           resolve()
         },
@@ -3301,6 +3313,7 @@ export class ProxyServer {
             return
           }
           console.error('[ProxyServer] Stream error:', error)
+          this.logRequestMilestone(res, 'Claude stream failed', { messageId: id, error: error.message })
           const errorEvent = createClaudeStreamEvent('error', {
             error: { type: 'api_error', message: error.message }
           })

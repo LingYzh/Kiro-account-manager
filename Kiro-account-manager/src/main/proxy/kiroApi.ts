@@ -16,6 +16,7 @@ import type {
   ProxyAccount
 } from './types'
 import { proxyLogger } from './logger'
+import { readEventStreamFrame } from './eventStreamFrame'
 import { getKProxyService } from '../kproxy'
 import { getSystemProxy, safeCreateProxyAgent } from './systemProxy'
 import {
@@ -264,10 +265,10 @@ REMEMBER: When in doubt, write LESS per operation. Multiple small operations > o
 const THINKING_MODE_PROMPT = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
 
-const CODEWHISPERER_DEFAULT_MODEL_ID = 'CLAUDE_SONNET_4_20250514_V1_0'
 const CODEWHISPERER_MODEL_CACHE_TTL = 5 * 60 * 1000
 
 const codeWhispererModelCache = new Map<string, { models: KiroModel[]; timestamp: number }>()
+const pendingModelRequests = new Map<string, Promise<KiroModel[]>>()
 
 // 模型 ID 映射
 const MODEL_ID_MAP: Record<string, string> = {
@@ -280,7 +281,10 @@ const MODEL_ID_MAP: Record<string, string> = {
   'claude-opus-4.5': 'claude-opus-4.5',
   // Claude 4 系列
   'claude-sonnet-4': 'claude-sonnet-4',
+  'claude-sonnet-4.0': 'claude-sonnet-4',
   'claude-sonnet-4-20250514': 'claude-sonnet-4',
+  'claude-3-7-sonnet-20250219': 'claude-3.7-sonnet',
+  'claude-3-7-sonnet': 'claude-3.7-sonnet',
   // Claude 3.5 系列 (映射到 Sonnet 4.5)
   'claude-3-5-sonnet': 'claude-sonnet-4.5',
   'claude-3-opus': 'claude-sonnet-4.5',
@@ -321,16 +325,15 @@ export function mapModelId(model: string): string {
   if (!modelId) return MODEL_ID_MAP.default
   if (isCodeWhispererModelId(modelId)) return modelId
   // 0) 归一化版本号短横 → 点号（claude-opus-4-6 → claude-opus-4.6），兼容不支持 "." 的客户端
-  modelId = normalizeClaudeVersion(modelId)
+  modelId = normalizeClaudeVersion(modelId).replace(/^(claude-(?:sonnet|haiku|opus)-\d+(?:\.\d+)?)-\d{8}$/i, '$1')
   const lower = modelId.toLowerCase()
   // 1) 显式 alias 映射优先
   if (MODEL_ID_MAP[lower]) return MODEL_ID_MAP[lower]
   // 2) 看似 Kiro 支持的 Claude 模型格式 (claude-{sonnet|haiku|opus}-{ver})，原样透传
   //    用于向前兼容尚未加入 MODEL_ID_MAP 的新发布模型
   if (/^claude-(sonnet|haiku|opus)-/.test(lower)) return modelId
-  // 3) 完全未知的 model（用户拼错/不存在），兜底到 default 避免直接 400
-  console.warn(`[Kiro API] Unknown model "${modelId}" → fallback to "${MODEL_ID_MAP.default}"`)
-  return MODEL_ID_MAP.default
+  // 新模型交给模型目录解析或上游校验，不能静默换成另一家族。
+  return modelId
 }
 
 function clonePayload(payload: KiroPayload): KiroPayload {
@@ -341,30 +344,10 @@ function normalizeModelKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
 
-function modelTokens(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-}
-
 function matchesRequestedModel(model: KiroModel, requestedModelId: string): boolean {
-  // 1. modelId 级精确匹配（去除符号后比较）
-  const requestedKey = normalizeModelKey(requestedModelId)
-  const modelIdKey = normalizeModelKey(model.modelId)
-  if (modelIdKey === requestedKey || modelIdKey.includes(requestedKey)) return true
-  // 2. modelName 精确匹配
-  if (model.modelName && normalizeModelKey(model.modelName).includes(requestedKey)) return true
-  // 3. token 匹配（所有请求 token 必须在 modelId+modelName 中命中，不搜索 description 避免误匹配）
-  const tokens = modelTokens(requestedModelId).filter(token => token !== 'latest' && token !== 'model')
-  if (tokens.length === 0) return false
-  const candidateTokens = new Set(modelTokens(`${model.modelId} ${model.modelName || ''}`))
-  // 必须全部 token 命中
-  if (!tokens.every(token => candidateTokens.has(token))) return false
-  // 防止模型家族冲突：如果请求包含 opus/sonnet/haiku，候选必须也包含对应的
-  const families = ['opus', 'sonnet', 'haiku']
-  for (const family of families) {
-    if (tokens.includes(family) && !candidateTokens.has(family)) return false
-    if (!tokens.includes(family) && candidateTokens.has(family)) return false
-  }
-  return true
+    const requestedKey = normalizeModelKey(requestedModelId)
+    return normalizeModelKey(model.modelId) === requestedKey
+        || normalizeModelKey(model.modelName || '') === requestedKey
 }
 
 function isCodeWhispererModelId(modelId: string): boolean {
@@ -375,21 +358,57 @@ function getModelCacheKey(account: ProxyAccount): string {
   return `${account.id}:${account.region || 'us-east-1'}:${resolveProfileArn(account) ?? 'no-arn'}`
 }
 
-async function getCachedCodeWhispererModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
-  const key = getModelCacheKey(account)
-  const cached = codeWhispererModelCache.get(key)
-  if (cached && Date.now() - cached.timestamp < CODEWHISPERER_MODEL_CACHE_TTL) return cached.models
-  const models = await fetchKiroModels(account, signal)
-  codeWhispererModelCache.set(key, { models, timestamp: Date.now() })
-  return models
+export function clearModelMetadataCache(): void {
+    codeWhispererModelCache.clear()
+    pendingModelRequests.clear()
 }
 
-async function resolveCodeWhispererModelId(account: ProxyAccount, requestedModelId?: string, signal?: AbortSignal): Promise<string> {
-  const modelId = requestedModelId?.trim()
-  if (!modelId) return CODEWHISPERER_DEFAULT_MODEL_ID
-  if (isCodeWhispererModelId(modelId)) return modelId
-  const models = await getCachedCodeWhispererModels(account, signal)
-  return models.find(model => matchesRequestedModel(model, modelId))?.modelId || CODEWHISPERER_DEFAULT_MODEL_ID
+export function isModelMetadataCached(account: ProxyAccount): boolean {
+    const cached = codeWhispererModelCache.get(getModelCacheKey(account))
+    // 空目录可能来自暂时网络故障，短缓存避免高并发反复请求且允许尽快恢复。
+    const ttl = cached?.models.length ? CODEWHISPERER_MODEL_CACHE_TTL : 15000
+    return !!cached && Date.now() - cached.timestamp < ttl
+}
+
+export async function getCachedKiroModels(account: ProxyAccount, signal?: AbortSignal): Promise<KiroModel[]> {
+    throwIfAborted(signal)
+    const key = getModelCacheKey(account)
+    const cached = codeWhispererModelCache.get(key)
+    if (cached && isModelMetadataCached(account)) return cached.models
+    let pending = pendingModelRequests.get(key)
+    if (!pending) {
+        // 独立超时防止一个客户端取消请求影响其它共用目录的请求。
+        pending = fetchKiroModels(account, AbortSignal.timeout(15000)).catch(() => [] as KiroModel[]).then(models => {
+            if (pendingModelRequests.get(key) === pending) {
+                const entry = { models, timestamp: Date.now() }
+                // Enterprise 首次加载可能补齐 profileArn，只缓存最终实际 profile。
+                codeWhispererModelCache.set(getModelCacheKey(account), entry)
+                for (const model of models) {
+                    if (model.tokenLimits?.maxInputTokens) setModelContextWindow(model.modelId, model.tokenLimits.maxInputTokens)
+                }
+            }
+            return models
+        }).finally(() => {
+            if (pendingModelRequests.get(key) === pending) pendingModelRequests.delete(key)
+        })
+        pendingModelRequests.set(key, pending)
+    }
+    if (!signal) return pending
+    return new Promise((resolve, reject) => {
+        function abort(): void { reject(getAbortError(signal)) }
+        signal.addEventListener('abort', abort, { once: true })
+        pending!.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+        if (signal.aborted) abort()
+    })
+}
+
+export async function resolveKiroModel(account: ProxyAccount, requestedModelId: string, signal?: AbortSignal): Promise<{ modelId: string; model?: KiroModel }> {
+    const modelId = mapModelId(requestedModelId)
+    const models = await getCachedKiroModels(account, signal)
+    // 精确 ID 优先于名字、标点归一化；避免 Sonnet 4 匹配到 Sonnet 4.5。
+    const model = models.find(candidate => candidate.modelId.toLowerCase() === modelId.toLowerCase())
+        || models.find(candidate => matchesRequestedModel(candidate, modelId))
+    return { modelId: model?.modelId || modelId, model }
 }
 
 function getPayloadModelId(payload: KiroPayload): string | undefined {
@@ -984,6 +1003,25 @@ export function buildKiroPayload(
   // 清理并准备所有消息（history + currentMessage）
   const allMessages = [...history, currentMessage]
   const sanitizedMessages = sanitizeConversation(normalizeToolHistory(allMessages, tools))
+    // Parallel clients may return results in completion order. Keep Kiro's
+    // result order aligned with the preceding assistant's tool calls.
+    for (let index = 1; index < sanitizedMessages.length; index++) {
+        const user = sanitizedMessages[index].userInputMessage
+        const context = user?.userInputMessageContext
+        const calls = sanitizedMessages[index - 1].assistantResponseMessage?.toolUses
+        if (!user || !context?.toolResults || context.toolResults.length < 2 || !calls?.length) continue
+        const order = new Map(calls.map((call, position) => [call.toolUseId, position]))
+        sanitizedMessages[index] = {
+            userInputMessage: {
+                ...user,
+                userInputMessageContext: {
+                    ...context,
+                    toolResults: [...context.toolResults].sort((left, right) =>
+                        (order.get(left.toolUseId) ?? calls.length) - (order.get(right.toolUseId) ?? calls.length))
+                }
+            }
+        }
+    }
   
   // 分离 history 和 currentMessage
   // currentMessage 是最后一条消息，history 是其余的
@@ -1102,6 +1140,9 @@ export function buildKiroPayload(
     toolResultsCount: toolResults.length,
     hasProfileArn: payload.profileArn !== undefined,
     hasThinking: !!additionalModelRequestFields?.thinking,
+    hasReasoning: !!additionalModelRequestFields?.reasoning,
+    reasoningEffort: (additionalModelRequestFields?.reasoning as { effort?: string } | undefined)?.effort,
+    outputEffort: (additionalModelRequestFields?.output_config as { effort?: string } | undefined)?.effort,
     payloadSize: initialPayloadSize
   })
 
@@ -1154,7 +1195,7 @@ export function clearAllCaches(): { conversation: number; model: number } {
   const conversationCount = conversationCache.size
   const modelCount = codeWhispererModelCache.size
   conversationCache.clear()
-  codeWhispererModelCache.clear()
+  clearModelMetadataCache()
   return { conversation: conversationCount, model: modelCount }
 }
 
@@ -1273,9 +1314,8 @@ export async function callKiroApiStream(
         requestPayload.profileArn = resolvedArn
       }
       const requestedModelId = getPayloadModelId(requestPayload)
-      if (endpoint.name === 'CodeWhisperer') {
-        applyPayloadModelId(requestPayload, await resolveCodeWhispererModelId(account, requestedModelId, signal))
-      }
+      const resolvedModel = await resolveKiroModel(account, requestedModelId || 'default', signal)
+      applyPayloadModelId(requestPayload, resolvedModel.modelId)
 
       applyPayloadOrigin(requestPayload, endpoint.origin)
 
@@ -1310,7 +1350,8 @@ export async function callKiroApiStream(
 
       if (response.status === 429) {
         console.log(`[KiroAPI] Endpoint ${endpoint.name} quota exhausted, trying next...`)
-        lastError = new Error(`Quota exhausted on ${endpoint.name}`)
+        lastError = new Error(`API error 429: Quota exhausted on ${endpoint.name}`)
+        await response.body?.cancel()
         continue
       }
 
@@ -1349,6 +1390,11 @@ export async function callKiroApiStream(
 
       // THINKING_SIGNATURE_INVALID: 剥离 history 中 reasoningContent 后重试一次（官方 IDE 同策略）
       const errMsg = (error as Error).message || ''
+      // 确定的模型/请求格式错误换端点也不会恢复；禁止把失败伪装为其它模型成功。
+      if (/API error (400|422):/.test(errMsg) && !errMsg.includes('THINKING_SIGNATURE_INVALID')) {
+          onError(error as Error)
+          return
+      }
       if (errMsg.includes('THINKING_SIGNATURE_INVALID')) {
         console.log(`[KiroAPI] THINKING_SIGNATURE_INVALID on ${endpoint.name}, retrying with reasoningContent stripped`)
         try {
@@ -1369,9 +1415,7 @@ export async function callKiroApiStream(
           } else {
             delete retryPayload.profileArn
           }
-          if (endpoint.name === 'CodeWhisperer') {
-            applyPayloadModelId(retryPayload, await resolveCodeWhispererModelId(account, getPayloadModelId(retryPayload), signal))
-          }
+          applyPayloadModelId(retryPayload, (await resolveKiroModel(account, getPayloadModelId(retryPayload) || 'default', signal)).modelId)
           applyPayloadOrigin(retryPayload, endpoint.origin)
           const retryStr = JSON.stringify(retryPayload)
           const retryHeaders = getAuthHeaders(account, endpoint)
@@ -1398,53 +1442,24 @@ export async function callKiroApiStream(
   }
 }
 
-// 从 headers 中提取 event type
-function extractEventType(headers: Uint8Array): string {
-  let offset = 0
-  while (offset < headers.length) {
-    if (offset >= headers.length) break
-    const nameLen = headers[offset]
-    offset++
-    if (offset + nameLen > headers.length) break
-    const name = new TextDecoder().decode(headers.slice(offset, offset + nameLen))
-    offset += nameLen
-    if (offset >= headers.length) break
-    const valueType = headers[offset]
-    offset++
-    
-    if (valueType === 7) { // String type
-      if (offset + 2 > headers.length) break
-      const valueLen = (headers[offset] << 8) | headers[offset + 1]
-      offset += 2
-      if (offset + valueLen > headers.length) break
-      const value = new TextDecoder().decode(headers.slice(offset, offset + valueLen))
-      offset += valueLen
-      if (name === ':event-type') {
-        return value
-      }
-      continue
-    }
-    
-    // Skip other value types
-    const skipSizes: Record<number, number> = { 0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16 }
-    if (valueType === 6) {
-      if (offset + 2 > headers.length) break
-      const len = (headers[offset] << 8) | headers[offset + 1]
-      offset += 2 + len
-    } else if (skipSizes[valueType] !== undefined) {
-      offset += skipSizes[valueType]
-    } else {
-      break
-    }
-  }
-  return ''
-}
-
 // Tool Use 状态跟踪
 interface ToolUseState {
   toolUseId: string
   name: string
   inputBuffer: string
+}
+
+function parseToolInput(tool: ToolUseState): Record<string, unknown> {
+    let input: unknown
+    try {
+        input = JSON.parse(tool.inputBuffer || '{}')
+    } catch {
+        throw new Error('Invalid upstream tool arguments: incomplete or malformed JSON')
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw new Error('Invalid upstream tool arguments: expected a JSON object')
+    }
+    return input as Record<string, unknown>
 }
 
 // Token 估算（被 promptCacheTracker 等模块使用，用于 cache 块大小判定）
@@ -1469,6 +1484,7 @@ async function parseEventStream(
     reader.cancel(getAbortError(signal)).catch(() => undefined)
   }
   let buffer = new Uint8Array(0)
+    let receivedFrame = false
   let usage: KiroUsage = { 
     inputTokens: 0, 
     outputTokens: 0, 
@@ -1651,7 +1667,7 @@ async function parseEventStream(
       buffer = newBuffer
 
       // 尝试解析消息
-      while (buffer.length >= 16) {
+      while (buffer.length >= 12) {
         // AWS Event Stream 格式：
         // - 4 bytes: total length
         // - 4 bytes: headers length
@@ -1660,29 +1676,25 @@ async function parseEventStream(
         // - payload
         // - 4 bytes: message CRC
 
-        const totalLength = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false)
-        
-        if (buffer.length < totalLength) {
-          break // 等待更多数据
+        const frame = readEventStreamFrame(buffer)
+        if (!frame) break
+        receivedFrame = true
+        const eventType = frame.headers[':event-type'] || ''
+        const messageType = frame.headers[':message-type']
+        // AWS exceptions carry their identity in headers, not necessarily JSON.
+        if (messageType === 'exception' || messageType === 'error') {
+            throw new Error(`Upstream stream error: ${frame.headers[':exception-type'] || frame.headers[':error-code'] || 'unknown'}`)
         }
 
-        const headersLength = new DataView(buffer.buffer, buffer.byteOffset).getUint32(4, false)
-        
-        // 从 headers 中提取 event type
-        const headersStart = 12
-        const headersEnd = 12 + headersLength
-        const eventType = extractEventType(buffer.slice(headersStart, headersEnd))
-        
-        // 提取 payload
-        const payloadStart = 12 + headersLength
-        const payloadEnd = totalLength - 4 // 减去 message CRC
-        
-        if (payloadStart < payloadEnd) {
-          const payloadBytes = buffer.slice(payloadStart, payloadEnd)
+        if (frame.payload.length > 0) {
+          const payloadBytes = frame.payload
           
           try {
-            const payloadText = new TextDecoder().decode(payloadBytes)
+            const payloadText = new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes)
             const event = JSON.parse(payloadText)
+            if (!event || typeof event !== 'object' || Array.isArray(event)) {
+                throw new Error('Invalid upstream EventStream JSON: expected an object')
+            }
             
             // 根据 event type 处理不同类型的事件
             if (eventType === 'assistantResponseEvent' || event.assistantResponseEvent) {
@@ -1746,12 +1758,7 @@ async function parseEventStream(
                 if (currentToolUse && currentToolUse.toolUseId !== toolUseId) {
                   // 前一个 tool use 被中断，完成它
                   if (!processedIds.has(currentToolUse.toolUseId)) {
-                    let finalInput: Record<string, unknown> = {}
-                    try {
-                      if (currentToolUse.inputBuffer) {
-                        finalInput = JSON.parse(currentToolUse.inputBuffer)
-                      }
-                    } catch { /* 忽略解析错误 */ }
+                    const finalInput = parseToolInput(currentToolUse)
                     await onChunk('', {
                       toolUseId: currentToolUse.toolUseId,
                       name: currentToolUse.name,
@@ -1791,41 +1798,19 @@ async function parseEventStream(
               
               // Tool use 完成
               if (isStop && currentToolUse) {
-                let finalInput: Record<string, unknown> = {}
-                let parseError = false
-                try {
-                  if (currentToolUse.inputBuffer) {
-                    if (logStreamEvents) proxyLogger.debug('Kiro', 'Tool input buffer: ' + currentToolUse.inputBuffer.substring(0, 200))
-                    finalInput = JSON.parse(currentToolUse.inputBuffer)
-                    if (logStreamEvents) proxyLogger.debug('Kiro', 'Parsed tool input: ' + JSON.stringify(finalInput).substring(0, 200))
-                  }
-                } catch (e) {
-                  parseError = true
-                  console.error('[Kiro] Failed to parse tool input:', e, 'Buffer:', currentToolUse.inputBuffer?.substring(0, 100))
-                  // 当 JSON 解析失败时，创建一个包含错误信息的 input
-                  // 这样客户端可以看到工具调用失败的原因
-                  finalInput = {
-                    _error: 'Tool input truncated by Kiro API (output token limit exceeded)',
-                    _partialInput: currentToolUse.inputBuffer?.substring(0, 500) || ''
-                  }
-                }
+                const finalInput = parseToolInput(currentToolUse)
                 
-                // 只有在成功解析或有错误信息时才发送
+                // 参数完整且为对象时才交付，损坏参数不能成为可执行调用。
                 await onChunk('', {
                   toolUseId: currentToolUse.toolUseId,
                   name: currentToolUse.name,
                   input: finalInput
                 })
-                if (toolLeakFixEnabled && !parseError) {
+                if (toolLeakFixEnabled) {
                   try { seenToolSigs.add(toolSig(currentToolUse.name, finalInput)) } catch { /* ignore */ }
                 }
                 totalOutputChars += currentToolUse.name.length + currentToolUse.inputBuffer.length
 
-                // 如果解析失败，额外发送一条文本消息告知用户
-                if (parseError) {
-                  await onChunk(`\n\n⚠️ Tool "${currentToolUse.name}" input was truncated by Kiro API. The output may be incomplete due to token limits.`)
-                }
-                
                 processedIds.add(currentToolUse.toolUseId)
                 currentToolUse = null
               }
@@ -2044,8 +2029,7 @@ async function parseEventStream(
               const reason = invalid.reason || 'UNKNOWN'
               const message = invalid.message || 'Invalid state detected'
               console.error('[Kiro] invalidStateEvent:', reason, message)
-              // 将无效状态作为错误消息输出
-              await onChunk(`\n\n⚠️ **Warning:** ${message} (reason: ${reason})`)
+              throw new Error(`Upstream invalid state: ${reason}`)
             }
             
             // 处理 citationEvent - 引用事件
@@ -2075,8 +2059,7 @@ async function parseEventStream(
             }
           } catch (parseError) {
             if (parseError instanceof SyntaxError) {
-              // JSON 解析错误，忽略
-              console.debug('[EventStream] JSON parse error:', parseError)
+              throw new Error('Invalid upstream EventStream JSON')
             } else {
               throw parseError
             }
@@ -2084,23 +2067,21 @@ async function parseEventStream(
         }
         
         // 移动到下一条消息
-        buffer = buffer.slice(totalLength)
+        buffer = buffer.slice(frame.length)
       }
     }
 
+    if (buffer.length > 0) throw new Error('Truncated upstream EventStream frame')
+    if (!receivedFrame) throw new Error('Empty upstream EventStream')
+
     // 工具调用 XML 泄漏修复：flush 过滤器残留文本
     if (toolLeakFixEnabled) {
-      try { await filterToolLeak(true) } catch { /* ignore */ }
+      await filterToolLeak(true)
     }
 
     // 完成任何未完成的 tool use
     if (currentToolUse && !processedIds.has(currentToolUse.toolUseId)) {
-      let finalInput: Record<string, unknown> = {}
-      try {
-        if (currentToolUse.inputBuffer) {
-          finalInput = JSON.parse(currentToolUse.inputBuffer)
-        }
-      } catch { /* 忽略解析错误 */ }
+      const finalInput = parseToolInput(currentToolUse)
       await onChunk('', {
         toolUseId: currentToolUse.toolUseId,
         name: currentToolUse.name,
@@ -2161,6 +2142,8 @@ async function parseEventStream(
     onError(signal?.aborted ? getAbortError(signal) : error as Error)
   } finally {
     signal?.removeEventListener('abort', abort)
+    // Stop fetching after a protocol failure instead of abandoning a live body.
+    try { await reader.cancel() } catch { /* The stream may already be closed. */ }
     reader.releaseLock()
   }
 }
