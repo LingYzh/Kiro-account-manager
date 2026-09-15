@@ -271,6 +271,64 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
+### v1.7.6 (2026-9-15) — GPT-5.6 Compatibility + Responses API Improvements + Background Token Refresh + GPTmail Registration + Stability Updates
+
+#### 🧠 GPT-5.6 and reasoning capability compatibility
+
+- **New**: Recognizes GPT-5.6 models exposed by Kiro and adds a GPT-5.6 context-window fallback when model metadata is incomplete.
+- **Fixed**: Reasoning-only models now expose their capabilities correctly, and Claude effort routing is based on model capabilities instead of hard-coded assumptions.
+- **New**: Optional request fields are derived from the `ListAvailableModels` schema, including different capability paths such as `reasoning` and `output_config`.
+- **Improved**: Unknown but valid upstream model IDs are preserved instead of being forced to a default model; model mappings can also define a default reasoning level.
+
+#### 🔌 OpenAI / Claude / Responses protocol compatibility
+
+- **Improved**: Expanded OpenAI Responses API streaming conversion, including response/output/tool events, tool-call IDs, and completion ordering.
+- **Fixed**: Retry boundaries after output emission were tightened to avoid duplicate events or inconsistent stream state after content has already been sent to the client.
+- **Improved**: Multi-protocol request and tool conversion is more consistent, with the effective model catalog resolved by account, region, and profile.
+- **New**: EventStream frame validation and stricter stream parsing reduce the chance that malformed or partial frames contaminate later output.
+
+#### 🔄 Proxy stability and concurrency control
+
+- **Fixed**: Accounts exhausted by 429/402 responses now recover according to `quotaResetMs` instead of being skipped indefinitely; available-account counts use deterministic checks.
+- **Improved**: Token refresh uses single-flight coordination so concurrent requests for the same account share the in-flight refresh result, reducing refresh-token rotation conflicts and unnecessary account switching.
+- **Improved**: End-to-end backpressure was added to SSE writes and Kiro stream parsing; slow clients now wait for drain instead of continuously growing write buffers.
+- **Fixed**: Prompt-cache fingerprints now use deep stable serialization so nested fields are not lost during canonicalization.
+- **Fixed**: Proxy health-check agents are closed after use; the MITM proxy buffers body chunks that arrive during handshake and includes additional re-entry/listener cleanup safeguards.
+
+#### 🔐 Background token refresh
+
+- **New**: A main-process account-pool token refresh scheduler checks expiring tokens every 60 seconds and continues working while the window is minimized to tray.
+- **Improved**: Electron `backgroundThrottling` is disabled so renderer-side refresh timers are not heavily throttled in the background.
+- **Improved**: Refresh lead time is now `max(2 × auto-refresh interval, 10 minutes)` to avoid tokens expiring between timer ticks.
+- **Fixed**: Main-process and renderer refresh paths share deduplication state to prevent simultaneous refreshes of the same refresh token.
+
+#### 📧 GPTmail registration and OTP retrieval
+
+- **New**: GPTmail (`mail.chatgpt.org.uk`) OTP source with support for direct private-domain delivery and Cloudflare forwarding.
+- **Fixed**: GPTmail no longer holds a stale SessionClient that may have been destroyed during TLS client rebuild; each operation resolves the current valid session.
+- **Fixed**: Concurrent shared-inbox OTP retrieval now uses baseline-ID filtering instead of clearing the whole inbox and potentially deleting codes for other tasks.
+- **Improved**: Browser UA / `sec-ch-ua` are aligned with Chrome 146 and the JA3 profile; 401/403 responses refresh tokens automatically; `__BROWSER_AUTH` parsing now balances braces to support nested objects.
+- **Fixed**: Batch registration validates Proton configuration before starting the workflow.
+
+#### 🏠 Home alerts and account filters
+
+- **New**: Home dashboard aggregates suspended accounts, subscriptions expiring within 7 days, and quota alerts at 90%+ usage; alerts can jump directly to the Accounts page with the relevant filter applied.
+- **New**: Desktop notifications for newly suspended accounts with local deduplication and a startup grace period to avoid notification floods.
+- **New**: Account filtering by email-domain suffix for easier bulk management of accounts from the same domain.
+
+#### 🛠️ Machine ID and platform compatibility
+
+- **Fixed**: Windows elevated relaunch now uses argument arrays and PowerShell single-quoted paths, fixing silent failures when the installation path contains spaces.
+- **Fixed**: macOS `osascript` escaping was corrected for paths and special characters during privileged operations.
+
+#### 🧪 Offline compatibility regression tests
+
+- **New**: `test:compat` entry point covering model capabilities, Responses protocol behavior, EventStream handling, and E2E compatibility scenarios.
+- **New**: Dedicated `compat-capabilities`, `compat-responses`, `compat-eventstream`, and full compatibility test suites to reduce protocol-regression risk.
+- **Updated**: Online E2E expectations for unknown-model handling and the Responses API now match the new passthrough and error behavior.
+
+---
+
 
 ### v1.7.5 (2026-6-7) — Thinking Mode + Enterprise profileArn Full Fix + Agent Mode & Steering + Tool Use Leak Fix
 
