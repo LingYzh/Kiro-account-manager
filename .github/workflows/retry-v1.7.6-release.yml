@@ -1,0 +1,65 @@
+name: Retry v1.7.6 Release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/release-retry-trigger-v1.7.6'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  fix-windows-runner-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Pin Windows release runners to Windows Server 2022
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('.github/workflows/build.yml')
+          text = path.read_text(encoding='utf-8')
+          old = 'runs-on: windows-latest'
+          new = 'runs-on: windows-2022'
+          count = text.count(old)
+
+          if count == 0:
+              print('Windows runners are already pinned; no workflow edit needed')
+          elif count == 2:
+              path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+              print('Pinned both Windows release jobs to windows-2022')
+          else:
+              raise RuntimeError(f'Expected exactly 2 windows-latest entries, found {count}')
+
+      - name: Commit runner compatibility fix
+        run: |
+          if git diff --quiet -- .github/workflows/build.yml; then
+            echo "build.yml already fixed"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/workflows/build.yml
+            git commit -m "ci: pin Windows release runner to windows-2022"
+            git push origin HEAD:master
+          fi
+
+      - name: Dispatch Build & Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref master
+
+      - name: Confirm dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Build & Release redispatched for master"
+          gh run list --workflow build.yml --branch master --limit 3
