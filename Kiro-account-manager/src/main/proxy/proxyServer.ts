@@ -35,6 +35,7 @@ import {
 import { ToolNameRegistry } from './toolNameRegistry'
 import { ResponsesStream } from './responsesStream'
 import { promptCacheTracker } from './promptCacheTracker'
+import { getRequestErrorDetails } from './requestErrors'
 import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument } from './steeringLoader'
 
 
@@ -770,6 +771,17 @@ export class ProxyServer {
   }
 
   private prepareClaudeRequest(request: ClaudeRequest): ClaudeRequest {
+    if (!Array.isArray(request.messages) || request.messages.some(message =>
+        !message || !['user', 'assistant', 'system'].includes(message.role))) {
+        throw new Error('messages must contain user, assistant, or system messages')
+    }
+    for (const message of request.messages) {
+        if (message.role !== 'system') continue
+        if (typeof message.content !== 'string' && (!Array.isArray(message.content)
+            || message.content.some(block => !block || block.type !== 'text' || typeof block.text !== 'string'))) {
+            throw new Error('Claude system message content must be text or text blocks')
+        }
+    }
     this.validateClaudeCacheControls(request)
 
     if (this.config.disableTools || request.tool_choice?.type === 'none') {
@@ -1335,7 +1347,9 @@ export class ProxyServer {
         console.log(`[ProxyServer] API call failed (attempt ${attempt + 1}/${maxRetries}): ${errMsg}`)
 
         // 在配额/认证关键字之前判断请求错误，防止错误正文误触发切号。
-        if (/API error (400|422):|INVALID_MODEL_ID|REQUEST_BODY_INVALID/.test(errMsg)) break
+        const requestError = getRequestErrorDetails(error)
+        if (requestError && [400, 413, 422].includes(requestError.statusCode)) break
+        if (/API error (400|413|422):|INVALID_MODEL_ID|REQUEST_BODY_INVALID/.test(errMsg)) break
 
         // 优先检测账号被长期封禁（不是 token 问题，刷新也没用）
         // 特征：HTTP 403 + reason: "TEMPORARILY_SUSPENDED" 或 AccountSuspendedException / 423
@@ -2084,6 +2098,7 @@ export class ProxyServer {
 
   private getAnthropicErrorType(status: number): string {
     if (status === 400) return 'invalid_request_error'
+    if (status === 413) return 'request_too_large'
     if (status === 401) return 'authentication_error'
     if (status === 403) return 'permission_error'
     if (status === 404) return 'not_found_error'
@@ -2888,9 +2903,10 @@ export class ProxyServer {
         model: request.model,
         stream: !!request.stream,
         messageCount: request.messages?.length,
+        messageRoles: Array.isArray(request.messages) ? request.messages.map(message => message?.role) : undefined,
         toolChoice: request.tool_choice?.type,
         toolCount: request.tools?.length || 0,
-        lastMessageBlocks: Array.isArray(request.messages?.at(-1)?.content)
+        lastMessageBlocks: Array.isArray(request.messages) && Array.isArray(request.messages.at(-1)?.content)
             ? (request.messages.at(-1)!.content as import('./types').ClaudeContentBlock[]).map(block => ({
                 type: block.type,
                 ...(block.type === 'tool_result' ? { toolUseId: block.tool_use_id, isError: block.is_error === true } : {})
@@ -3062,14 +3078,6 @@ export class ProxyServer {
     signal?: AbortSignal,
     simulatedCacheUsage?: { cacheCreationInputTokens: number; cacheReadInputTokens: number; cacheProfile?: unknown; accountId?: string }
   ): Promise<void> {
-    if (!headersSent) {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      })
-    }
-
     const id = msgId || `msg_${uuidv4()}`
     let currentBlockIndex = contentBlockIndex
     let hasStartedTextBlock = false
@@ -3092,29 +3100,69 @@ export class ProxyServer {
     // 估算输入 tokens（基于 payload 大小）
     const estimatedInputTokens = Math.max(1, Math.round(JSON.stringify(kiroPayload).length / 3))
     
-    // 发送 message_start（仅首轮）
-    if (currentRound === 0) {
-      const messageStart = createClaudeStreamEvent('message_start', {
-        message: {
-          id,
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          model,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: estimatedInputTokens, output_tokens: 0 }
+    let hasStartedMessage = headersSent && currentRound > 0
+    // Delay success headers until content (or a valid empty completion) arrives.
+    // Upstream rejections before this point must remain HTTP errors for the harness.
+    function startMessage(): void {
+        if (hasStartedMessage) return
+        if (!res.headersSent) {
+            res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+            })
         }
-      })
-      res.write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
+        if (currentRound === 0) {
+            const messageStart = createClaudeStreamEvent('message_start', {
+                message: {
+                    id,
+                    type: 'message',
+                    role: 'assistant',
+                    content: [],
+                    model,
+                    stop_reason: null,
+                    stop_sequence: null,
+                    usage: { input_tokens: estimatedInputTokens, output_tokens: 0 }
+                }
+            })
+            res.write(`event: message_start\ndata: ${JSON.stringify(messageStart)}\n\n`)
+        }
+        hasStartedMessage = true
     }
 
     return new Promise((resolve) => {
+      let settled = false
+      const fail = (error: Error): void => {
+          if (settled) return
+          settled = true
+          if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
+              resolve()
+              return
+          }
+          const details = getRequestErrorDetails(error)
+          const status = details?.statusCode ?? 502
+          this.logRequestMilestone(res, 'Claude stream failed', { messageId: id, status, error: error.message })
+          if (!res.headersSent) {
+              this.sendError(res, status, details?.message ?? error.message, 'anthropic')
+          } else {
+              const errorEvent = createClaudeStreamEvent('error', {
+                  error: { type: details?.anthropicType ?? 'api_error', message: details?.message ?? error.message }
+              })
+              res.write(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
+              res.end()
+          }
+          this.recordRequestFailed()
+          this.accountPool.recordError(account.id, classifyError(status), status)
+          this.events.onResponse?.({ path: '/v1/messages', model, status, error: error.message })
+          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
+          resolve()
+      }
       callKiroApiStream(
         account as any,
         kiroPayload,
         (text, toolUse, isThinking, reasoningSignature, redactedContent) => {
-          if (signal?.aborted || this.isResponseClosed(res)) return
+          if (settled || signal?.aborted || this.isResponseClosed(res)) return
+          if (text || toolUse || redactedContent) startMessage()
           // 优先处理 redacted_thinking（加密的 thinking 块，需单独 content_block）
           if (redactedContent) {
             if (hasStartedTextBlock) {
@@ -3239,11 +3287,12 @@ export class ProxyServer {
           }
           return this.waitForDrain(res)
         },
-        async (usage) => {
-          if (signal?.aborted || this.isResponseClosed(res)) {
+        (usage) => {
+          if (settled || signal?.aborted || this.isResponseClosed(res)) {
             resolve()
             return
           }
+          startMessage()
           if (hasStartedThinkingBlock) {
             flushThinkingSignature()
             const blockStop = createClaudeStreamEvent('content_block_stop', { index: currentBlockIndex })
@@ -3304,42 +3353,14 @@ export class ProxyServer {
                   textLength: collectedContent.length
               })
           }
+          settled = true
           res.end()
           resolve()
         },
-        (error) => {
-          if (this.isAbortError(error, signal) || this.isResponseClosed(res)) {
-            resolve()
-            return
-          }
-          console.error('[ProxyServer] Stream error:', error)
-          this.logRequestMilestone(res, 'Claude stream failed', { messageId: id, error: error.message })
-          const errorEvent = createClaudeStreamEvent('error', {
-            error: { type: 'api_error', message: error.message }
-          })
-          res.write(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
-          res.end()
-
-          this.recordRequestFailed()
-          const errStatusCode2 = error.message.match(/(\d{3})/)?.[1]
-          this.accountPool.recordError(account.id, errStatusCode2 ? classifyError(parseInt(errStatusCode2)) : ErrorType.RECOVERABLE, errStatusCode2 ? parseInt(errStatusCode2) : undefined)
-          this.events.onResponse?.({ path: '/v1/messages', model, status: 500, error: error.message })
-          this.recordRequest({ path: '/v1/messages', model, accountId: account.id, responseTime: Date.now() - startTime, success: false, error: error.message })
-          resolve()
-        },
+        fail,
         signal,
         this.config.preferredEndpoint
-      ).catch(error => {
-        if (!this.isAbortError(error, signal) && !this.isResponseClosed(res)) {
-          const errorEvent = createClaudeStreamEvent('error', {
-            error: { type: 'api_error', message: error.message }
-          })
-          res.write(`event: error\ndata: ${JSON.stringify(errorEvent)}\n\n`)
-          res.end()
-          this.recordRequestFailed()
-        }
-        resolve()
-      })
+      ).catch(fail)
     })
   }
 
@@ -3347,10 +3368,11 @@ export class ProxyServer {
   private handleApiError(res: http.ServerResponse, account: { id: string }, error: Error, path: string, model?: string, startTime?: number, signal?: AbortSignal): void {
     if (this.isAbortError(error, signal) || this.isResponseClosed(res)) return
     this.recordRequestFailed()
-    const errCode = error.message.match(/(\d{3})/)?.[1]
-    const parsedCode = errCode ? parseInt(errCode) : 500
+    const details = getRequestErrorDetails(error)
+    const errCode = error.message.match(/(?:API|Auth) error (\d{3}):/)?.[1]
+    const parsedCode = details?.statusCode ?? (errCode ? parseInt(errCode) : 500)
     const errorType = classifyError(parsedCode)
-    const isAuthError = error.message.includes('401') || error.message.includes('403') || error.message.includes('Auth')
+    const isAuthError = parsedCode === 401 || parsedCode === 403
 
     this.accountPool.recordError(account.id, errorType, parsedCode)
 
@@ -3369,7 +3391,7 @@ export class ProxyServer {
       return
     }
 
-    this.sendError(res, statusCode, error.message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
+    this.sendError(res, statusCode, details?.message ?? error.message, this.isAnthropicPath(path) ? 'anthropic' : 'openai')
     this.events.onResponse?.({ path, status: statusCode, error: error.message })
     this.recordRequest({ path, model, accountId: account.id, responseTime: startTime ? Date.now() - startTime : 0, success: false, error: error.message })
   }

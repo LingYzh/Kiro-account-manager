@@ -16,6 +16,7 @@ import type {
   ProxyAccount
 } from './types'
 import { proxyLogger } from './logger'
+import { ContextLimitError, PayloadSizeLimitError, KiroHttpError, createKiroHttpError } from './requestErrors'
 import { readEventStreamFrame } from './eventStreamFrame'
 import { getKProxyService } from '../kproxy'
 import { getSystemProxy, safeCreateProxyAgent } from './systemProxy'
@@ -889,47 +890,48 @@ function sanitizeConversation(messages: KiroHistoryMessage[]): KiroHistoryMessag
   return sanitized
 }
 
-// 按 token 估算成对裁剪 history 最旧消息 (避免后端 CONTENT_LENGTH_EXCEEDS_THRESHOLD)
-// 切点保证不破坏 toolUse↔toolResult 配对：assistant(toolUse) 必须连同后续 user(toolResult) 一起裁
-// 裁剪后用 ensureStartsWithUserMessage 兜底重新规范化
-function trimHistoryByTokens(payload: KiroPayload, maxTokens: number): { trimmed: number; finalTokens: number; iterations: number } {
-  let history = payload.conversationState.history
-  if (!history || history.length === 0) {
-    return { trimmed: 0, finalTokens: estimatePayloadTokens(payload), iterations: 0 }
-  }
-
-  let totalTrimmed = 0
-  let iterations = 0
-  let currentTokens = estimatePayloadTokens(payload)
-  const MAX_ITERATIONS = 100 // 防止极端情况死循环
-
-  while (currentTokens > maxTokens && history.length >= 4 && iterations < MAX_ITERATIONS) {
-    iterations++
-    // 计算安全切点：从 index 0 开始至少裁掉 1 组 (user+assistant)，并连带 toolUse/toolResult 配对
-    let cutAt = 0
-    while (cutAt < history.length - 2) {
-      const msg = history[cutAt]
-      // assistant(toolUse) → 下一条 user(toolResult) 必须一起裁，避免配对断裂
-      if (isAssistantResponseMessage(msg) && hasToolUses(msg)) {
-        cutAt += 2
-      } else {
-        cutAt += 1
-      }
-      if (cutAt >= 2) break
+// Only remove complete ordinary history prefixes. A retained suffix must still be valid
+// with the current message, including any tool result that depends on the last assistant.
+function trimHistoryByTokens(payload: KiroPayload, maxTokens: number, protectedPrefixLength: number): { trimmed: number; finalTokens: number } {
+    let trimmed = 0
+    let currentTokens = estimatePayloadTokens(payload)
+    const current = payload.conversationState.currentMessage
+    while (currentTokens > maxTokens) {
+        const history = payload.conversationState.history ?? []
+        const firstOrdinary = protectedPrefixLength
+        if (firstOrdinary >= history.length) break
+        let cutAt = -1
+        for (let index = firstOrdinary + 1; index <= history.length; index++) {
+            if (index < history.length && !isUserInputMessage(history[index])) continue
+            // A suffix cannot begin with an orphaned tool result, even if the
+            // generic validator sees it as the first message and skips adjacency checks.
+            if (index < history.length && hasToolResults(history[index])) continue
+            const retained = [...history.slice(0, protectedPrefixLength), ...history.slice(index)]
+            const lastAssistant = retained.at(-1)
+            if (hasToolResults(current) && (!lastAssistant || !hasToolUses(lastAssistant)
+                || !hasMatchingToolResults(lastAssistant.assistantResponseMessage?.toolUses, current.userInputMessage?.userInputMessageContext?.toolResults))) continue
+            const candidate = [...retained, current]
+            if (validateConversation(candidate).length === 0) {
+                cutAt = index
+                break
+            }
+        }
+        if (cutAt < 0) break
+        const nextHistory = [...history.slice(0, protectedPrefixLength), ...history.slice(cutAt)]
+        trimmed += cutAt - firstOrdinary
+        payload.conversationState.history = nextHistory.length ? nextHistory : undefined
+        currentTokens = estimatePayloadTokens(payload)
     }
-
-    if (cutAt === 0) break // 无法继续裁剪
-
-    history = history.slice(cutAt)
-    totalTrimmed += cutAt
-
-    // 裁剪后 history 可能以 assistant 起头 → 补 HELLO 重新规范
-    history = ensureStartsWithUserMessage(history)
-    payload.conversationState.history = history
-    currentTokens = estimatePayloadTokens(payload)
-  }
-
-  return { trimmed: totalTrimmed, finalTokens: currentTokens, iterations }
+    if (trimmed > 0) {
+        const notice = '[Earlier conversation history was omitted by the proxy to fit the model context limit.]'
+        const user = payload.conversationState.history?.[protectedPrefixLength]?.userInputMessage
+            ?? payload.conversationState.currentMessage.userInputMessage
+        user.content = `${notice}\n\n${user.content}`
+        currentTokens = estimatePayloadTokens(payload)
+        const errors = validateConversation([...(payload.conversationState.history ?? []), current])
+        if (errors.length) throw new Error(`Invalid Kiro conversation after trimming: ${errors.join(', ')}`)
+    }
+    return { trimmed, finalTokens: currentTokens }
 }
 
 // ============= 构建 Kiro API 请求负载（参考 Kiro 官方实现）=============
@@ -944,7 +946,7 @@ export function buildKiroPayload(
   images: KiroImage[] = [],
   profileArn?: string,
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number },
-  messageOptions?: { cachePoint?: KiroCachePoint | undefined; clientCacheConfig?: unknown; documents?: KiroDocument[]; conversationId?: string; context?: KiroRequestContext },
+  messageOptions?: { cachePoint?: KiroCachePoint | undefined; clientCacheConfig?: unknown; documents?: KiroDocument[]; conversationId?: string; context?: KiroRequestContext; systemMessages?: KiroHistoryMessage[]; preserveHistory?: boolean },
   additionalModelRequestFields?: Record<string, unknown>
 ): KiroPayload {
   // 构建当前消息
@@ -1026,6 +1028,12 @@ export function buildKiroPayload(
   // 分离 history 和 currentMessage
   // currentMessage 是最后一条消息，history 是其余的
   const sanitizedHistory = sanitizedMessages.slice(0, -1)
+    const systemMessages = messageOptions?.systemMessages ?? []
+    const combinedHistory = [...systemMessages, ...sanitizedHistory]
+    const prefixErrors = validateConversation([...combinedHistory, sanitizedMessages.at(-1)!])
+    if (prefixErrors.length) {
+        throw new Error(`Invalid Kiro system prefix: ${prefixErrors.join(', ')}`)
+    }
   let finalCurrentMessage = sanitizedMessages.at(-1)!
 
   // 确保 currentMessage 是 user 消息（sanitizeConversation 保证以 user 消息结束）
@@ -1058,7 +1066,7 @@ export function buildKiroPayload(
       currentMessage: {
         userInputMessage: finalCurrentMessage.userInputMessage!
       },
-      history: sanitizedHistory.length > 0 ? sanitizedHistory : undefined
+      history: combinedHistory.length > 0 ? JSON.parse(JSON.stringify(combinedHistory)) as KiroHistoryMessage[] : undefined
     }
   }
 
@@ -1090,46 +1098,52 @@ export function buildKiroPayload(
   // effectiveLimit 按模型 context window 自动算：ctx - tokenBufferReserve（开关启用时，默认 20K）
   // 例：sonnet-4.5 (200K) → 180K, sonnet-4.5 with 1M beta → 980K
   // 开关关闭时完全跳过，超出 context window 由 Kiro 后端原样返回错误
-  if (enableTokenBufferReserve) {
-    const effectiveTokenLimit = getEffectiveTokenLimit(modelId)
-    const tokenTrimResult = trimHistoryByTokens(payload, effectiveTokenLimit)
-    if (tokenTrimResult.trimmed > 0) {
-      const modelCtx = getModelContextLength(modelId)
-      console.log(`[KiroPayload] Trimmed ${tokenTrimResult.trimmed} oldest history messages by token estimate (≈${tokenTrimResult.finalTokens.toLocaleString()} / ${effectiveTokenLimit.toLocaleString()} tokens [model ctx ${modelCtx.toLocaleString()} - buffer ${tokenBufferReserve.toLocaleString()}], ${tokenTrimResult.iterations} iter)`)
+    const allowLossyHistory = enableTokenBufferReserve && !messageOptions?.preserveHistory
+    if (allowLossyHistory) {
+        const effectiveTokenLimit = getEffectiveTokenLimit(modelId)
+        const tokenTrimResult = trimHistoryByTokens(payload, effectiveTokenLimit, systemMessages.length)
+        if (tokenTrimResult.trimmed > 0) {
+            const modelCtx = getModelContextLength(modelId)
+            console.log(`[KiroPayload] Trimmed ${tokenTrimResult.trimmed} oldest history messages by token estimate (≈${tokenTrimResult.finalTokens.toLocaleString()} / ${effectiveTokenLimit.toLocaleString()} tokens [model ctx ${modelCtx.toLocaleString()} - buffer ${tokenBufferReserve.toLocaleString()}])`)
+        }
     }
-  }
 
   // ====== 第二阶段：按 byte 截断 tool result 内容 ======
   // 避免 HTTP body 过大被 Kiro 网关拒绝
-  // 用户可在高级设置中调整限制值（默认 1536KB = 1.5MB）
-  const PAYLOAD_SIZE_LIMIT = (payloadSizeLimitKB || 1536) * 1024
-  const TOOL_RESULT_TRUNCATE_LENGTH = 4000
-  let initialPayloadSize = JSON.stringify(payload).length
-  if (initialPayloadSize > PAYLOAD_SIZE_LIMIT && payload.conversationState.history) {
-    const historyMessages = payload.conversationState.history
-    let truncatedCount = 0
-    for (const message of historyMessages) {
-      if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
-      const userToolResults = message.userInputMessage?.userInputMessageContext?.toolResults
-      if (!userToolResults) continue
-      for (const toolResult of userToolResults) {
-        if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
-        if (!toolResult.content) continue
-        for (const contentItem of toolResult.content) {
-          if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
-          if (contentItem.text && contentItem.text.length > TOOL_RESULT_TRUNCATE_LENGTH) {
-            const originalLen = contentItem.text.length
-            contentItem.text = `${contentItem.text.slice(0, TOOL_RESULT_TRUNCATE_LENGTH)}\n\n[Truncated by proxy: original ${originalLen} chars]`
-            truncatedCount++
-            initialPayloadSize = JSON.stringify(payload).length
-          }
+  // 用户可在高级设置中调整限制值（默认 150MB）
+    const PAYLOAD_SIZE_LIMIT = payloadSizeLimitKB * 1024
+    const TOOL_RESULT_TRUNCATE_LENGTH = 4000
+    let initialPayloadSize = Buffer.byteLength(JSON.stringify(payload), 'utf8')
+    if (allowLossyHistory && initialPayloadSize > PAYLOAD_SIZE_LIMIT && payload.conversationState.history) {
+        const historyMessages = payload.conversationState.history
+        let truncatedCount = 0
+        const protectedLastAssistant = hasToolResults(payload.conversationState.currentMessage)
+            ? historyMessages.length - 1 : historyMessages.length
+        for (let index = systemMessages.length; index < protectedLastAssistant; index++) {
+            const message = historyMessages[index]
+            if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
+            const userToolResults = message.userInputMessage?.userInputMessageContext?.toolResults
+            if (!userToolResults) continue
+            for (const toolResult of userToolResults) {
+                if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
+                if (!toolResult.content) continue
+                for (const contentItem of toolResult.content) {
+                    if (initialPayloadSize <= PAYLOAD_SIZE_LIMIT) break
+                    if (contentItem.text && contentItem.text.length > TOOL_RESULT_TRUNCATE_LENGTH) {
+                        const originalLen = contentItem.text.length
+                        contentItem.text = `${contentItem.text.slice(0, TOOL_RESULT_TRUNCATE_LENGTH)}\n\n[Truncated by proxy: original ${originalLen} chars]`
+                        truncatedCount++
+                        initialPayloadSize = Buffer.byteLength(JSON.stringify(payload), 'utf8')
+                    }
+                }
+            }
         }
-      }
+        if (truncatedCount > 0) {
+            console.log(`[KiroPayload] Truncated ${truncatedCount} large tool results to fit payload size limit (final size: ${initialPayloadSize} bytes)`)
+        }
     }
-    if (truncatedCount > 0) {
-      console.log(`[KiroPayload] Truncated ${truncatedCount} large tool results to fit payload size limit (final size: ${initialPayloadSize} bytes)`)
-    }
-  }
+
+    if (initialPayloadSize > PAYLOAD_SIZE_LIMIT) throw new PayloadSizeLimitError(PAYLOAD_SIZE_LIMIT)
 
   // 调试日志
   console.log(`[KiroPayload] Built payload (native history mode):`, {
@@ -1326,6 +1340,8 @@ export async function callKiroApiStream(
       }
 
       const payloadStr = JSON.stringify(requestPayload)
+      const payloadBytes = Buffer.byteLength(payloadStr, 'utf8')
+      if (payloadBytes > payloadSizeLimitKB * 1024) throw new PayloadSizeLimitError(payloadSizeLimitKB * 1024)
       const headers = getAuthHeaders(account, endpoint)
       const currentUserInput = requestPayload.conversationState.currentMessage.userInputMessage
       const historyMessages = requestPayload.conversationState.history ?? []
@@ -1340,7 +1356,7 @@ export async function callKiroApiStream(
       console.log(`[KiroAPI]   - Model ID: ${currentUserInput?.modelId || 'default'}`)
       console.log(`[KiroAPI]   - Has profileArn: ${requestPayload.profileArn !== undefined}`)
       console.log(`[KiroAPI]   - Agent mode: ${headers['x-amzn-kiro-agent-mode']}`)
-      console.log(`[KiroAPI]   - Payload size: ${payloadStr.length} bytes`)
+      console.log(`[KiroAPI]   - Payload size: ${payloadBytes} bytes`)
       
       const agent = getNetworkAgent(account)
       if (agent) proxyLogger.debug('KiroAPI', `Stream request via proxy to ${endpoint.name}`)
@@ -1350,7 +1366,7 @@ export async function callKiroApiStream(
 
       if (response.status === 429) {
         console.log(`[KiroAPI] Endpoint ${endpoint.name} quota exhausted, trying next...`)
-        lastError = new Error(`API error 429: Quota exhausted on ${endpoint.name}`)
+        lastError = new KiroHttpError(429, `Quota exhausted on ${endpoint.name}`)
         await response.body?.cancel()
         continue
       }
@@ -1359,14 +1375,14 @@ export async function callKiroApiStream(
         throwIfAborted(signal)
         const body = await response.text()
         throwIfAborted(signal)
-        throw new Error(`Auth error ${response.status}: ${body}`)
+        throw createKiroHttpError(response.status, body)
       }
 
       if (!response.ok) {
         throwIfAborted(signal)
         const body = await response.text()
         throwIfAborted(signal)
-        throw new Error(`API error ${response.status}: ${body}`)
+        throw createKiroHttpError(response.status, body)
       }
 
       // 解析 Event Stream
@@ -1383,15 +1399,20 @@ export async function callKiroApiStream(
       console.error(`[KiroAPI] Endpoint ${endpoint.name} failed:`, error)
       
       // 如果是认证错误，不继续尝试其他端点
-      if ((error as Error).message.includes('Auth error')) {
+      if ((error instanceof KiroHttpError && (error.statusCode === 401 || error.statusCode === 403)) || (error as Error).message.includes('Auth error')) {
         onError(error as Error)
+        return
+      }
+
+      if (error instanceof ContextLimitError || error instanceof PayloadSizeLimitError) {
+        onError(error)
         return
       }
 
       // THINKING_SIGNATURE_INVALID: 剥离 history 中 reasoningContent 后重试一次（官方 IDE 同策略）
       const errMsg = (error as Error).message || ''
       // 确定的模型/请求格式错误换端点也不会恢复；禁止把失败伪装为其它模型成功。
-      if (/API error (400|422):/.test(errMsg) && !errMsg.includes('THINKING_SIGNATURE_INVALID')) {
+      if ((error instanceof KiroHttpError && (error.statusCode === 400 || error.statusCode === 422 || error.statusCode === 413)) && !errMsg.includes('THINKING_SIGNATURE_INVALID')) {
           onError(error as Error)
           return
       }
@@ -1418,6 +1439,9 @@ export async function callKiroApiStream(
           applyPayloadModelId(retryPayload, (await resolveKiroModel(account, getPayloadModelId(retryPayload) || 'default', signal)).modelId)
           applyPayloadOrigin(retryPayload, endpoint.origin)
           const retryStr = JSON.stringify(retryPayload)
+            if (Buffer.byteLength(retryStr, 'utf8') > payloadSizeLimitKB * 1024) {
+                throw new PayloadSizeLimitError(payloadSizeLimitKB * 1024)
+            }
           const retryHeaders = getAuthHeaders(account, endpoint)
           const retryAgent = getNetworkAgent(account)
           const retryResponse = retryAgent
@@ -1428,9 +1452,19 @@ export async function callKiroApiStream(
             return
           }
           const retryBody = await retryResponse.text()
+            const retryError = createKiroHttpError(retryResponse.status, retryBody)
+            if (retryError instanceof ContextLimitError || retryError instanceof PayloadSizeLimitError
+                || (retryError instanceof KiroHttpError && retryError.statusCode === 413)) {
+                onError(retryError)
+                return
+            }
           console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry also failed: ${retryResponse.status} ${retryBody.slice(0, 200)}`)
         } catch (retryErr) {
           if (signal?.aborted) { onError(getAbortError(signal)); return }
+            if (retryErr instanceof ContextLimitError || retryErr instanceof PayloadSizeLimitError) {
+                onError(retryErr)
+                return
+            }
           console.error(`[KiroAPI] THINKING_SIGNATURE_INVALID retry error:`, retryErr)
         }
       }
@@ -2029,6 +2063,7 @@ async function parseEventStream(
               const reason = invalid.reason || 'UNKNOWN'
               const message = invalid.message || 'Invalid state detected'
               console.error('[Kiro] invalidStateEvent:', reason, message)
+              if (reason === 'CONTENT_LENGTH_EXCEEDS_THRESHOLD') throw new ContextLimitError()
               throw new Error(`Upstream invalid state: ${reason}`)
             }
             

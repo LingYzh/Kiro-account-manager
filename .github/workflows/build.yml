@@ -2,6 +2,9 @@
 name: Build & Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 # 设置工作目录
@@ -29,6 +32,10 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             TAG_NAME="${{ github.ref_name }}"
+            if [[ "$TAG_NAME" != "v$VERSION" ]]; then
+              echo "Release tag does not match package.json version"
+              exit 1
+            fi
           else
             TAG_NAME="v$VERSION"
           fi

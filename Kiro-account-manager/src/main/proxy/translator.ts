@@ -435,20 +435,6 @@ export function openaiToKiro(
   const timestamp = new Date().toISOString()
   systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
-  // 注入执行导向指令（防止 AI 在探索过程中丢失目标）
-  const executionDirective = `
-<execution_discipline>
-当用户要求执行特定任务时，你必须遵循以下纪律：
-1. **目标锁定**：在整个会话中始终牢记用户的原始目标，不要在代码探索过程中迷失方向
-2. **行动优先**：优先执行任务而非仅分析或总结，除非用户明确只要求分析
-3. **计划执行**：为任务创建明确的步骤计划，逐步执行并标记完成状态
-4. **禁止确认性收尾**：在任务未完成前，禁止输出"需要我继续吗？"、"需要深入分析吗？"等确认性问题
-5. **持续推进**：如果发现部分任务已完成，立即继续执行剩余未完成的任务
-6. **完整交付**：直到所有任务步骤都执行完毕才算完成
-</execution_discipline>
-`
-  systemPrompt = systemPrompt + '\n\n' + executionDirective
-
   // 构建历史消息（参考 Proxycast 实现）
   const history: KiroHistoryMessage[] = []
   const toolResults: KiroToolResult[] = []
@@ -587,25 +573,25 @@ export function openaiToKiro(
     currentContent = 'Tool results provided.'
   }
 
-  // System prompt 以 Kiro 官方方式注入：作为 Human/AI pair 插入到 history 头部
-  if (systemPrompt) {
-    const systemMessages: KiroHistoryMessage[] = [
-      {
-        userInputMessage: {
-          content: systemPrompt,
-          userInputMessageContext: {},
-          origin,
-          ...(systemCachePoint ? { cachePoint: systemCachePoint } : {})
-        }
-      },
-      {
-        assistantResponseMessage: {
-          content: 'I will follow these instructions.'
-        }
-      }
-    ]
-    history.unshift(...systemMessages)
-  }
+    // 顶层 system 单独传入，在普通会话完成清理后再注入，避免裁剪旧历史时丢失。
+    const systemMessages: KiroHistoryMessage[] = []
+    if (systemPrompt) {
+        systemMessages.push(
+            {
+                userInputMessage: {
+                    content: systemPrompt,
+                    userInputMessageContext: {},
+                    origin,
+                    ...(systemCachePoint ? { cachePoint: systemCachePoint } : {})
+                }
+            },
+            {
+                assistantResponseMessage: {
+                    content: 'I will follow these instructions.'
+                }
+            }
+        )
+    }
   const finalContent = currentContent || 'Continue.'
 
   // 转换工具定义
@@ -636,7 +622,8 @@ export function openaiToKiro(
       cachePoint: currentCachePoint,
       documents,
       conversationId: request.conversation_id,
-      context: request.kiro_context
+      context: request.kiro_context,
+      systemMessages
     },
     additionalModelRequestFields
   )
@@ -913,20 +900,6 @@ export function claudeToKiro(
   const timestamp = new Date().toISOString()
   systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
-  // 注入执行导向指令（防止 AI 在探索过程中丢失目标）
-  const executionDirective = `
-<execution_discipline>
-当用户要求执行特定任务时，你必须遵循以下纪律：
-1. **目标锁定**：在整个会话中始终牢记用户的原始目标，不要在代码探索过程中迷失方向
-2. **行动优先**：优先执行任务而非仅分析或总结，除非用户明确只要求分析
-3. **计划执行**：为任务创建明确的步骤计划，逐步执行并标记完成状态
-4. **禁止确认性收尾**：在任务未完成前，禁止输出"需要我继续吗？"、"需要深入分析吗？"等确认性问题
-5. **持续推进**：如果发现部分任务已完成，立即继续执行剩余未完成的任务
-6. **完整交付**：直到所有任务步骤都执行完毕才算完成
-</execution_discipline>
-`
-  systemPrompt = systemPrompt + '\n\n' + executionDirective
-
   // 构建历史消息 - Kiro API 要求严格的 user -> assistant 交替
   const history: KiroHistoryMessage[] = []
   let currentToolResults: KiroToolResult[] = []  // 只保存最后一条消息的 toolResults
@@ -941,13 +914,17 @@ export function claudeToKiro(
   let pendingUserDocuments: KiroDocument[] = []
   let pendingToolResults: KiroToolResult[] = []
   let pendingUserCachePoint: KiroCachePoint | undefined
+    let preserveHistory = false
 
   for (let i = 0; i < request.messages.length; i++) {
     const msg = request.messages[i]
     const isLast = i === request.messages.length - 1
 
-    if (msg.role === 'user') {
-      const { content: userContent, images: userImages, documents: userDocuments, toolResults: userToolResults, cachePoint: userCachePoint } = extractClaudeContent(msg)
+    if (msg.role === 'user' || msg.role === 'system') {
+        // messages[] 内的 system 按原位置并入相邻 user 回合，不能提升为顶层规则。
+        const { content: userContent, images: userImages, documents: userDocuments, toolResults: userToolResults, cachePoint: userCachePoint } =
+            msg.role === 'system' ? extractClaudeInlineSystem(msg) : extractClaudeContent(msg)
+        if (msg.role === 'system') preserveHistory = true
 
       if (isLast) {
         // 最后一条消息：合并之前的 pending 内容，toolResults 放入 currentMessage
@@ -1038,6 +1015,8 @@ export function claudeToKiro(
         ...(toolUses.length > 0 ? { toolUses } : {})
       }
       history.push({ assistantResponseMessage })
+    } else {
+        throw new Error(`Unsupported Claude message role: ${String(msg.role)}`)
     }
   }
 
@@ -1062,27 +1041,26 @@ export function claudeToKiro(
     })
   }
 
-  // 构建最终内容
-  // System prompt 以 Kiro 官方方式注入：作为 Human/AI pair 插入到 history 头部
-  // 官方 Kiro IDE: [Human(systemPrompt, forcedRole), AI("I will follow these instructions.", forcedRole)]
-  if (systemPrompt) {
-    const systemMessages: KiroHistoryMessage[] = [
-      {
-        userInputMessage: {
-          content: systemPrompt,
-          userInputMessageContext: {},
-          origin,
-          ...(systemCachePoint ? { cachePoint: systemCachePoint } : {})
-        }
-      },
-      {
-        assistantResponseMessage: {
-          content: 'I will follow these instructions.'
-        }
-      }
-    ]
-    history.unshift(...systemMessages)
-  }
+    // 顶层 system 在普通会话完成清理后再注入，避免裁剪旧历史时丢失。
+    // 官方 Kiro IDE: [Human(systemPrompt, forcedRole), AI("I will follow these instructions.", forcedRole)]
+    const systemMessages: KiroHistoryMessage[] = []
+    if (systemPrompt) {
+        systemMessages.push(
+            {
+                userInputMessage: {
+                    content: systemPrompt,
+                    userInputMessageContext: {},
+                    origin,
+                    ...(systemCachePoint ? { cachePoint: systemCachePoint } : {})
+                }
+            },
+            {
+                assistantResponseMessage: {
+                    content: 'I will follow these instructions.'
+                }
+            }
+        )
+    }
   const finalContent = currentContent || (currentToolResults.length > 0 ? 'Tool results provided.' : 'Continue')
 
   // 转换工具定义
@@ -1113,10 +1091,31 @@ export function claudeToKiro(
       cachePoint: currentCachePoint,
       documents,
       conversationId: request.conversation_id,
-      context: request.kiro_context
+      context: request.kiro_context,
+      systemMessages,
+      preserveHistory
     },
     additionalModelRequestFields
   )
+}
+
+function extractClaudeInlineSystem(msg: ClaudeMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; toolResults: KiroToolResult[]; cachePoint?: KiroCachePoint } {
+    let cachePoint = toKiroCachePoint(msg.cache_control)
+    if (typeof msg.content === 'string') {
+        return { content: msg.content, images: [], documents: [], toolResults: [], cachePoint }
+    }
+    if (!Array.isArray(msg.content)) {
+        throw new Error('Claude system message content must be text or text blocks')
+    }
+    const textParts: string[] = []
+    for (const block of msg.content) {
+        if (block.type !== 'text' || typeof block.text !== 'string') {
+            throw new Error(`Unsupported Claude system content block: ${String(block.type)}`)
+        }
+        textParts.push(block.text)
+        cachePoint = mergeCachePoint(cachePoint, toKiroCachePoint(block.cache_control))
+    }
+    return { content: textParts.join('\n'), images: [], documents: [], toolResults: [], cachePoint }
 }
 
 function extractClaudeContent(msg: ClaudeMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; toolResults: KiroToolResult[]; cachePoint?: KiroCachePoint } {

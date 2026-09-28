@@ -986,7 +986,7 @@ export function ProxyPanel() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="payloadSizeLimit" className="text-xs" title={isEn ? 'When payload exceeds this limit, oldest tool results will be truncated. Default 1536KB (1.5MB).' : '超过此限制时，最旧工具结果将被截断。默认 1536KB (1.5MB)'}>{isEn ? 'Payload (KB)' : 'Payload (KB)'}</Label>
+                <Label htmlFor="payloadSizeLimit" className="text-xs" title={isEn ? 'Maximum UTF-8 request size. Oversized requests return an error; old tool results may be shortened only when proxy trimming is enabled. Default 153600 KB (150 MB).' : '请求的 UTF-8 字节上限。超限时返回错误；仅主动开启代理裁剪后才可能截短旧工具结果。默认 153600 KB（150 MB）。'}>{isEn ? 'Payload (KB)' : 'Payload (KB)'}</Label>
                 <Input
                   id="payloadSizeLimit"
                   type="number"
@@ -1037,7 +1037,7 @@ export function ProxyPanel() {
               </div>
               {/* Token Buffer Reserve — 占 3 列合为一行：开关 + 输入 */}
               <div className="col-span-3 space-y-1.5">
-                <Label htmlFor="tokenBufferReserve" className="text-xs" title={isEn ? 'When enabled, reserves N tokens below context window for trim (e.g. 200K → trim at 180K). When disabled, never trims.' : '启用后从模型 context window 预留 N 个 token 作为裁剪阈值（例：200K → 180K 裁剪）。关闭时不裁剪任何旧消息。'}>{isEn ? 'Token Buffer Reserve (auto-trim history)' : 'Token Buffer 预留 (自动裁旧 history)'}</Label>
+                <Label htmlFor="tokenBufferReserve" className="text-xs" title={isEn ? 'Off by default: preserves history and tool results for the client. When enabled, removes old turns using the estimated token budget and may shorten old tool results. Requests with mid-conversation system messages are always preserved.' : '默认关闭：保留历史和工具结果，交给客户端管理。开启后按估算 token 预算删除旧轮次，并可能截短旧工具结果。含中途 system 消息的请求始终保留。'}>{isEn ? 'Proxy trimming / reserved tokens' : '代理裁剪 / 预留 token'}</Label>
                 <div className="flex items-center gap-2">
                   <div className="flex items-center justify-between h-9 px-3 rounded-md border border-input bg-transparent w-[160px] flex-shrink-0">
                     <span className="text-xs text-muted-foreground">{isEn ? 'Auto-trim' : '启用裁剪'}</span>

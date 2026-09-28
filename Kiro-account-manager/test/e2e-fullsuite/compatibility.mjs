@@ -9,7 +9,7 @@ const project = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const virtualFile = resolve(project, 'test/compatibility-bundle.cjs')
 const compiled = await build({
     stdin: {
-        contents: "export { ProxyServer } from './src/main/proxy/proxyServer'; export { clearAllCaches, resolveKiroModel } from './src/main/proxy/kiroApi'",
+        contents: "export { ProxyServer } from './src/main/proxy/proxyServer'; export { clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve } from './src/main/proxy/kiroApi'",
         resolveDir: project,
         loader: 'ts'
     },
@@ -40,7 +40,7 @@ bundledModule.filename = virtualFile
 bundledModule.paths = Module._nodeModulePaths(project)
 bundledModule.require = createRequire(virtualFile)
 bundledModule._compile(compiled.outputFiles[0].text, virtualFile)
-const { ProxyServer, clearAllCaches, resolveKiroModel } = bundledModule.exports
+const { ProxyServer, clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve } = bundledModule.exports
 
 const rawFetch = globalThis.fetch
 const output = console.log.bind(console)
@@ -125,6 +125,12 @@ globalThis.fetch = async function fixtureFetch(url, options = {}) {
     if (upstreamMode === 'failover' && options.headers.Authorization === 'Bearer fixture-a') {
         return Response.json({ reason: 'quota exhausted' }, { status: 402 })
     }
+    if (upstreamMode === 'prompt-too-long') {
+        return Response.json({ reason: 'CONTENT_LENGTH_EXCEEDS_THRESHOLD', message: 'Input is too long.' }, { status: 400 })
+    }
+    if (upstreamMode === 'payload-too-large') {
+        return Response.json({ reason: 'PAYLOAD_TOO_LARGE', message: 'Request entity is too large.' }, { status: 413 })
+    }
     const id = payload.conversationState.currentMessage.userInputMessage.modelId
     if (upstreamMode === 'invalid' || id === 'unknown-future-model') {
         return Response.json({ reason: 'INVALID_MODEL_ID' }, { status: 400 })
@@ -182,7 +188,9 @@ async function post(path, body) {
         signal: AbortSignal.timeout(10000)
     })
     const text = await response.text()
-    return { status: response.status, text, json: body.stream ? undefined : JSON.parse(text) }
+    const contentType = response.headers.get('content-type') || ''
+    const json = contentType.includes('application/json') ? JSON.parse(text) : undefined
+    return { status: response.status, text, json }
 }
 
 function events(text) {
@@ -274,6 +282,181 @@ try {
             assert.equal(result.status, 200, result.text)
             assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, id)
             assert.equal(Object.hasOwn(requests.at(-1).payload, 'additionalModelRequestFields'), false)
+        }
+    })
+    await check('Claude inline system messages preserve position, blocks, and cache points', async () => {
+        upstreamMode = 'text'
+        const result = await post('/v1/messages', {
+            model: 'claude-sonnet-4.5',
+            max_tokens: 100,
+            messages: [
+                { role: 'system', content: 'FULL_PLAN_MARKER' },
+                { role: 'user', content: 'NORMAL_USER_MARKER' },
+                { role: 'assistant', content: [{ type: 'text', text: 'ASSISTANT_MARKER' }] },
+                { role: 'system', content: [{ type: 'text', text: 'SPARSE_MARKER', cache_control: { type: 'ephemeral' } }] },
+                { role: 'system', content: 'EXIT_MARKER' },
+                { role: 'user', content: 'FINAL_USER_MARKER' }
+            ]
+        })
+        assert.equal(result.status, 200, result.text)
+        const payload = requests.at(-1).payload
+        const history = payload.conversationState.history
+        const serialized = JSON.stringify(payload)
+        const markers = ['FULL_PLAN_MARKER', 'NORMAL_USER_MARKER', 'ASSISTANT_MARKER', 'SPARSE_MARKER', 'EXIT_MARKER', 'FINAL_USER_MARKER']
+        const conversationMessages = [
+            ...history,
+            { userInputMessage: payload.conversationState.currentMessage.userInputMessage }
+        ]
+        const orderedText = conversationMessages.map(message =>
+            message.userInputMessage?.content ?? message.assistantResponseMessage?.content ?? ''
+        ).join('\n')
+        const positions = markers.map(marker => orderedText.indexOf(marker))
+        assert.ok(positions.every(position => position >= 0), 'every system and conversation marker must reach Kiro')
+        assert.deepEqual(positions, [...positions].sort((left, right) => left - right), 'Kiro payload text must retain the client order')
+        assert.equal(history[2].userInputMessage.content, 'FULL_PLAN_MARKER\nNORMAL_USER_MARKER')
+        assert.equal(history[3].assistantResponseMessage.content, 'ASSISTANT_MARKER')
+        assert.equal(payload.conversationState.currentMessage.userInputMessage.content, 'SPARSE_MARKER\nEXIT_MARKER\nFINAL_USER_MARKER')
+        assert.deepEqual(payload.conversationState.currentMessage.userInputMessage.cachePoint, { type: 'default' })
+        assert.equal(serialized.includes('execution_discipline'), false)
+    })
+    await check('Claude rejects an unknown inline message role before generating upstream requests', async () => {
+        const before = requests.length
+        const result = await post('/v1/messages', {
+            model: 'claude-sonnet-4.5',
+            max_tokens: 100,
+            messages: [{ role: 'system-typo', content: 'must not be forwarded' }]
+        })
+        assert.equal(result.status, 400, result.text)
+        assert.equal(result.json?.error?.type, 'invalid_request_error', result.text)
+        assert.equal(requests.length, before)
+
+        const unsupportedSystemBlock = await post('/v1/messages', {
+            model: 'claude-sonnet-4.5',
+            max_tokens: 100,
+            messages: [{
+                role: 'system',
+                content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }]
+            }]
+        })
+        assert.equal(unsupportedSystemBlock.status, 400, unsupportedSystemBlock.text)
+        assert.equal(unsupportedSystemBlock.json?.error?.type, 'invalid_request_error', unsupportedSystemBlock.text)
+        assert.equal(requests.length, before)
+    })
+    await check('Claude tool use, intervening system message, and tool result remain intact', async () => {
+        upstreamMode = 'text'
+        const result = await post('/v1/messages', {
+            model: 'claude-sonnet-4.5',
+            max_tokens: 100,
+            messages: [
+                { role: 'user', content: 'TOOL_SCENARIO_START' },
+                { role: 'assistant', content: [
+                    { type: 'text', text: 'I will call a tool.' },
+                    { type: 'tool_use', id: 'system-gap-call', name: 'lookup_data', input: { query: 'fixture-query' } }
+                ] },
+                { role: 'system', content: [{ type: 'text', text: 'SYSTEM_BETWEEN_TOOL_AND_RESULT' }] },
+                { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'system-gap-call', is_error: true, content: [{ type: 'text', text: 'TOOL_RESULT_BODY' }] }] }
+            ],
+            tools: [{ name: 'lookup_data', description: 'Fixture lookup', input_schema: { type: 'object', properties: { query: { type: 'string' } } } }]
+        })
+        assert.equal(result.status, 200, result.text)
+        const payload = requests.at(-1).payload
+        const assistant = payload.conversationState.history
+            .map(item => item.assistantResponseMessage)
+            .find(message => message?.toolUses?.some(toolUse => toolUse.toolUseId === 'system-gap-call'))
+        assert.ok(assistant)
+        assert.equal(assistant.toolUses[0].toolUseId, 'system-gap-call')
+        assert.deepEqual(assistant.toolUses[0].input, { query: 'fixture-query' })
+        const current = payload.conversationState.currentMessage.userInputMessage
+        assert.ok(current.content.includes('SYSTEM_BETWEEN_TOOL_AND_RESULT'))
+        assert.deepEqual(current.userInputMessageContext.toolResults.map(item => ({ id: item.toolUseId, status: item.status, text: item.content[0].text })), [
+            { id: 'system-gap-call', status: 'error', text: 'TOOL_RESULT_BODY' }
+        ])
+    })
+    await check('Claude prompt-too-long errors fail once for stream and non-stream requests', async () => {
+        upstreamMode = 'prompt-too-long'
+        await start(['a', 'b'])
+        for (const stream of [false, true]) {
+            const before = requests.length
+            const result = await post('/v1/messages', {
+                model: 'claude-sonnet-4.5',
+                max_tokens: 100,
+                messages: [{ role: 'user', content: 'fixture prompt' }],
+                stream
+            })
+            assert.equal(result.status, 400, result.text)
+            assert.equal(result.json?.error?.type, 'invalid_request_error', result.text)
+            assert.match(result.json?.error?.message || '', /capability_rejected: prompt_too_long/)
+            assert.equal(requests.length - before, 1, 'fatal prompt size rejection must not fail over to another account')
+        }
+    })
+    await check('Claude invalid model and upstream 413 do not become prompt-too-long errors', async () => {
+        await start(['a', 'b'])
+        upstreamMode = 'invalid'
+        const invalidModel = await post('/v1/messages', {
+            model: 'claude-sonnet-4.5',
+            max_tokens: 100,
+            messages: [{ role: 'user', content: 'fixture prompt' }]
+        })
+        assert.equal(invalidModel.status, 400, invalidModel.text)
+        assert.equal(invalidModel.json?.error?.type, 'invalid_request_error', invalidModel.text)
+        assert.equal(invalidModel.json?.error?.message?.includes('prompt_too_long'), false)
+
+        upstreamMode = 'payload-too-large'
+        for (const stream of [false, true]) {
+            const tooLarge = await post('/v1/messages', {
+                model: 'claude-sonnet-4.5',
+                max_tokens: 100,
+                messages: [{ role: 'user', content: 'fixture prompt' }],
+                stream
+            })
+            assert.equal(tooLarge.status, 413, tooLarge.text)
+            assert.equal(tooLarge.json?.error?.type, 'request_too_large', tooLarge.text)
+            assert.equal(tooLarge.json?.error?.message?.includes('prompt_too_long'), false)
+        }
+    })
+    await check('Claude invalidStateEvent maps context errors before and after output without replay', async () => {
+        upstreamMode = 'text'
+        const contextRejected = frame('invalidStateEvent', {
+            reason: 'CONTENT_LENGTH_EXCEEDS_THRESHOLD',
+            message: 'Input is too long.'
+        })
+        try {
+            await start(['a', 'b'])
+            upstreamFrames = [contextRejected]
+            const before = requests.length
+            const beforeOutput = await post('/v1/messages', {
+                model: 'claude-sonnet-4.5',
+                max_tokens: 100,
+                messages: [{ role: 'user', content: 'fixture prompt' }],
+                stream: true
+            })
+            assert.equal(beforeOutput.status, 400, beforeOutput.text)
+            assert.equal(beforeOutput.json?.error?.type, 'invalid_request_error', beforeOutput.text)
+            assert.match(beforeOutput.json?.error?.message || '', /capability_rejected: prompt_too_long/)
+            assert.equal(requests.length - before, 1)
+
+            await start(['a', 'b'])
+            upstreamFrames = [
+                frame('assistantResponseEvent', { content: 'prefix' }),
+                contextRejected
+            ]
+            const afterBefore = requests.length
+            const afterOutput = await post('/v1/messages', {
+                model: 'claude-sonnet-4.5',
+                max_tokens: 100,
+                messages: [{ role: 'user', content: 'fixture prompt' }],
+                stream: true
+            })
+            assert.equal(afterOutput.status, 200, afterOutput.text)
+            const stream = events(afterOutput.text)
+            const errors = stream.filter(event => event.type === 'error')
+            assert.equal(errors.length, 1)
+            assert.equal(errors[0].error.type, 'invalid_request_error')
+            assert.match(errors[0].error.message, /capability_rejected: prompt_too_long/)
+            assert.equal(stream.some(event => event.type === 'message_stop' || event.type === 'message_delta'), false)
+            assert.equal(requests.length - afterBefore, 1)
+        } finally {
+            upstreamFrames = undefined
         }
     })
     await check('unknown model is sent unchanged and fatal 400 is not retried', async () => {
@@ -679,7 +862,6 @@ try {
         const cases = [
             [],
             [badCrc],
-            [validText, validText.subarray(0, -1)],
             [Buffer.alloc(16)],
             [frame('assistantResponseEvent', {}, {}, Buffer.from('{bad'))],
             [frame('assistantResponseEvent', {}, {}, Buffer.from([0xff]))],
@@ -697,12 +879,25 @@ try {
                 upstreamFrames = chunks
                 const before = requests.length
                 const claude = await post('/v1/messages', { model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hello' }], max_tokens: 100, stream: true })
-                const stream = events(claude.text)
-                assert.equal(stream.at(-1).type, 'error', claude.text)
-                assert.equal(stream.filter(event => event.type === 'error').length, 1)
-                assert.equal(stream.some(event => event.type === 'message_stop' || event.content_block?.type === 'tool_use'), false)
+                assert.equal(claude.status, 502, claude.text)
+                assert.equal(claude.json?.error?.type, 'api_error', claude.text)
+                assert.equal(claude.text.includes('event: '), false, 'pre-output failures must remain HTTP errors')
                 assert.equal(requests.length - before, 1)
             }
+            // Once text has reached the client, a corrupt frame must become one SSE error without a success terminator.
+            for (const chunks of [[validText, badCrc], [validText, validText.subarray(0, -1)]]) {
+                await start()
+                upstreamFrames = chunks
+                const afterOutputBefore = requests.length
+                const claudeAfterOutput = await post('/v1/messages', { model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hello' }], max_tokens: 100, stream: true })
+                assert.equal(claudeAfterOutput.status, 200, claudeAfterOutput.text)
+                const claudeAfterOutputEvents = events(claudeAfterOutput.text)
+                assert.equal(claudeAfterOutputEvents.at(-1).type, 'error', claudeAfterOutput.text)
+                assert.equal(claudeAfterOutputEvents.filter(event => event.type === 'error').length, 1)
+                assert.equal(claudeAfterOutputEvents.some(event => event.type === 'message_stop' || event.type === 'message_delta' || event.content_block?.type === 'tool_use'), false)
+                assert.equal(requests.length - afterOutputBefore, 1)
+            }
+
             // All three protocols must retain the failure after partial output.
             upstreamFrames = [validText, badCrc]
             for (const path of ['/v1/responses', '/v1/chat/completions']) {
@@ -763,6 +958,58 @@ try {
         assert.deepEqual(results.map(item => [item.toolUseId, item.status, item.content[0].text]), [
             ['first-call', 'success', 'sunny'], ['second-call', 'error', 'failure']
         ])
+    })
+    await check('payload limits count UTF-8 bytes and preserve tool results under the limit', async () => {
+        try {
+            upstreamMode = 'text'
+            await start()
+            setPayloadSizeLimitKB(256)
+            setEnableTokenBufferReserve(false)
+
+            const unicodeText = '中'.repeat(90000)
+            assert.ok(unicodeText.length < 256 * 1024)
+            assert.ok(Buffer.byteLength(unicodeText, 'utf8') > 256 * 1024)
+            const beforeOversized = requests.length
+            for (const stream of [false, true]) {
+                const oversized = await post('/v1/messages', {
+                    model: 'claude-sonnet-4.5',
+                    max_tokens: 100,
+                    messages: [{ role: 'user', content: unicodeText }],
+                    stream
+                })
+                assert.equal(oversized.status, 413, oversized.text)
+                assert.equal(oversized.json?.error?.type, 'request_too_large', oversized.text)
+            }
+            assert.equal(requests.length, beforeOversized, 'an oversized Kiro payload must not call generateAssistantResponse')
+
+            const sourceToolResult = `${'fixture tool output line\n'.repeat(8000)}TOOL_RESULT_TAIL_MARKER`
+            const beforeToolResult = requests.length
+            const retainedResult = await post('/v1/messages', {
+                model: 'claude-sonnet-4.5',
+                max_tokens: 100,
+                messages: [
+                    { role: 'user', content: 'H'.repeat(1000) },
+                    { role: 'assistant', content: [{ type: 'tool_use', id: 'large-result-call', name: 'lookup_data', input: {} }] },
+                    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'large-result-call', content: sourceToolResult }] },
+                    { role: 'assistant', content: 'Tool result received.' },
+                    { role: 'user', content: 'Continue with the next step.' }
+                ],
+                tools: [{ name: 'lookup_data', description: 'Fixture lookup', input_schema: { type: 'object', properties: {} } }]
+            })
+            assert.equal(retainedResult.status, 200, retainedResult.text)
+            assert.equal(requests.length - beforeToolResult, 1)
+            const payload = requests.at(-1).payload
+            const toolResult = payload.conversationState.history
+                .flatMap(message => message.userInputMessage?.userInputMessageContext?.toolResults ?? [])
+                .find(item => item.toolUseId === 'large-result-call')
+            assert.ok(toolResult)
+            assert.ok(Buffer.byteLength(JSON.stringify(payload), 'utf8') < 256 * 1024)
+            assert.equal(toolResult.content[0].text, sourceToolResult, 'the result tail must remain intact below the configured limit')
+        } finally {
+            setPayloadSizeLimitKB(153600)
+            setEnableTokenBufferReserve(false)
+            upstreamFrames = undefined
+        }
     })
     output(`Compatibility HTTP checks passed: ${checks}`)
 } finally {

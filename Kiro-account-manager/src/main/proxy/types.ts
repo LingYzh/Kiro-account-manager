@@ -216,7 +216,7 @@ export interface ClaudeRequest {
 }
 
 export interface ClaudeMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string | ClaudeContentBlock[]
   cache_control?: ClaudeCacheControl
 }
@@ -547,10 +547,10 @@ export interface ProxyConfig {
   clientDrivenToolExecution?: boolean
   // 禁用工具调用（移除 tools 参数）
   disableTools?: boolean
-  // Payload 大小限制（KB），超过时截断工具结果（byte 维度）
+  // Payload 大小限制（KB），超过时返回 413；只有显式启用裁剪才允许截断工具结果。
   payloadSizeLimitKB?: number
-  // Token buffer reserve 开关（默认 false = 完全跳过 trimHistoryByTokens）
-  // 关闭时后端不再裁剪任何旧消息，超出 context window 由 Kiro 后端原样返回错误
+  // Token buffer reserve 开关（默认 false）：关闭时既不按 token 删除旧历史，也不按 byte 截断工具结果。
+  // 开启才允许显式有损裁剪；超出 byte 限额且无法安全裁剪时返回 413。
   enableTokenBufferReserve?: boolean
   // Token buffer reserve（仅在 enableTokenBufferReserve=true 时生效）
   // effective limit = model.maxInputTokens - buffer

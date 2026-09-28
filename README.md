@@ -271,6 +271,15 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
+### v1.7.7 (2026-9-28) — Permission Mode Context Preservation and Request Limit Fixes
+
+- **Fixed**: Preserve inline Claude `system` messages, ordering, and cache markers instead of dropping permission/plan mode instructions during translation. User testing confirmed that agents recognize their permission mode again.
+- **Changed**: Remove the proxy's hard-coded execution instructions to respect the client's planning, confirmation, and execution rules.
+- **Fixed**: Disable both history deletion and tool-result truncation by default. Explicit proxy trimming protects top-level instructions and current tool-call dependencies; conversations containing inline `system` messages retain their history.
+- **Fixed**: Enforce payload limits using actual UTF-8 bytes and distinguish context-limit errors (400) from oversized requests (413), without retrying deterministic size failures across accounts or endpoints.
+- **Fixed**: Return proper HTTP errors before Claude streaming content starts; failures after output emit one error without a false successful completion.
+- **Validated**: Five offline test suites, 30 HTTP regression checks, and the full build pass. Actual cache metrics, dynamic timestamps, and client compaction still need separate verification; this release does not claim improved upstream cache hit rates.
+
 ### v1.7.6 (2026-9-15) — GPT-5.6 Compatibility + Responses API Improvements + Background Token Refresh + GPTmail Registration + Stability Updates
 
 #### 🧠 GPT-5.6 and reasoning capability compatibility
