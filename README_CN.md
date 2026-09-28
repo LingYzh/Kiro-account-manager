@@ -1,5 +1,7 @@
 # Kiro 账户管理器
 
+Claude Code 用户请参阅[网关兼容边界、缓存行为与推荐设置](docs/claude-code-gateway.md)。
+
 <p align="center">
   <img src="Kiro-account-manager/resources/icon.png" width="128" height="128" alt="Kiro Logo">
 </p>
@@ -270,6 +272,14 @@ npx electron-builder --linux --arm64
 ---
 
 ## 📋 更新日志
+
+### v1.7.8 (2026-9-29) — Claude Code 网关模型名称与缓存诊断
+
+- **优化**：向 Claude Code 展示 `claude-opus-5-5` 等可识别的模型 ID，实际请求仍按账号目录解析至 Kiro 上游 ID。“查看模型”可同时查看、复制两种 ID；默认开启的持久化开关控制模型发现及一键配置。
+- **优化**：保留 Claude Code 的 system、历史、工具结果和主请求/辅助请求/压缩请求的会话身份；去掉代理添加的动态时间戳。缓存用量只在上游提供真实数据时展示。
+- **修复**：不支持的 Claude 语义约束明确报错；修复流式错误边界；本地解包版缺少更新清单时跳过自动更新，避免启动报错。
+- **验证**：离线兼容测试、42 组模拟 HTTP 回归、TypeScript 检查和生产构建通过；尚无真实上游缓存节省数据。
+- **遗留**：用户实测 effort 档位已经出现，但 Ultracode 仍未显示，自动模式安全分类器仍会卡住。不会伪造分类结果或服务端安全审查，具体根因仍待请求级证据确认。
 
 ### v1.7.7 (2026-9-28) — Permission Mode 上下文保留与超限错误修复
 

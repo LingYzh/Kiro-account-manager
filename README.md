@@ -1,5 +1,7 @@
 # Kiro Account Manager
 
+Claude Code users: see [gateway compatibility, cache behavior, and recommended settings](docs/claude-code-gateway.md).
+
 <p align="center">
   <img src="Kiro-account-manager/resources/icon.png" width="128" height="128" alt="Kiro Logo">
 </p>
@@ -270,6 +272,14 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ---
 
 ## 📋 Changelog
+
+### v1.7.8 (2026-9-29) — Claude Code Gateway Identity and Cache Diagnostics
+
+- **Improved**: Expose Claude Code compatible model IDs such as `claude-opus-5-5` while resolving requests to the account's Kiro model ID. View Models shows and copies both IDs; a saved, default-on switch controls discovery and one-click client configuration.
+- **Improved**: Preserve Claude Code system/history/tool context and conversation identity across regular, auxiliary, and compaction requests. Remove changing proxy-added timestamps and report upstream cache usage only when upstream telemetry supplies it.
+- **Fixed**: Reject unsupported Claude execution constraints explicitly, preserve true stream/error boundaries, and make the local unpacked build skip auto-update when its update manifest is absent.
+- **Validated**: Offline compatibility tests, 42 synthetic HTTP scenarios, TypeScript checks, and production build passed. The gateway is still an adapter; actual upstream cache savings were not established by these tests.
+- **Open issues**: The user's Claude Code now offers effort levels, but Ultracode is still unavailable and automatic-mode safety classification still stalls. No classifier verdict or server-side safety review is synthesized; root-cause tracing remains pending.
 
 ### v1.7.7 (2026-9-28) — Permission Mode Context Preservation and Request Limit Fixes
 

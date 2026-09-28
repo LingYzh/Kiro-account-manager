@@ -431,10 +431,6 @@ export function openaiToKiro(
     }
   }
 
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
-
   // 构建历史消息（参考 Proxycast 实现）
   const history: KiroHistoryMessage[] = []
   const toolResults: KiroToolResult[] = []
@@ -879,26 +875,11 @@ export function claudeToKiro(
   request: ClaudeRequest,
   profileArn?: string,
   toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
-  thinkingConfig?: ThinkingConfig
+  thinkingConfig?: ThinkingConfig,
+  options?: { preserveHistory?: boolean }
 ): KiroPayload {
   const modelId = mapModelId(request.model)
   const origin = 'AI_EDITOR'
-
-  // 提取系统提示
-  let systemPrompt = ''
-  let systemCachePoint: KiroCachePoint | undefined
-  if (typeof request.system === 'string') {
-    systemPrompt = request.system
-  } else if (Array.isArray(request.system)) {
-    systemPrompt = request.system.map(b => {
-      systemCachePoint = mergeCachePoint(systemCachePoint, toKiroCachePoint(b.cache_control))
-      return b.text
-    }).join('\n')
-  }
-
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  systemPrompt = `[Context: Current time is ${timestamp}]\n\n${systemPrompt}`
 
   // 构建历史消息 - Kiro API 要求严格的 user -> assistant 交替
   const history: KiroHistoryMessage[] = []
@@ -914,7 +895,7 @@ export function claudeToKiro(
   let pendingUserDocuments: KiroDocument[] = []
   let pendingToolResults: KiroToolResult[] = []
   let pendingUserCachePoint: KiroCachePoint | undefined
-    let preserveHistory = false
+    let preserveHistory = options?.preserveHistory === true
 
   for (let i = 0; i < request.messages.length; i++) {
     const msg = request.messages[i]
@@ -932,7 +913,7 @@ export function claudeToKiro(
         images.push(...pendingUserImages, ...userImages)
         documents.push(...pendingUserDocuments, ...userDocuments)
         currentToolResults = [...pendingToolResults, ...userToolResults]
-        currentCachePoint = mergeCachePoint(pendingUserCachePoint, userCachePoint)
+        currentCachePoint = userCachePoint
         pendingUserContent = ''
         pendingUserImages = []
         pendingUserDocuments = []
@@ -947,7 +928,7 @@ export function claudeToKiro(
           const finalUserImages = [...pendingUserImages, ...userImages]
           const finalUserDocuments = [...pendingUserDocuments, ...userDocuments]
           const finalToolResults = [...pendingToolResults, ...userToolResults]
-          const finalCachePoint = mergeCachePoint(pendingUserCachePoint, userCachePoint)
+          const finalCachePoint = userCachePoint
           
           if (finalUserContent.trim() || finalUserImages.length > 0 || finalUserDocuments.length > 0 || finalToolResults.length > 0) {
             const userInputMessage: KiroUserInputMessage = {
@@ -977,7 +958,7 @@ export function claudeToKiro(
           pendingUserImages.push(...userImages)
           pendingUserDocuments.push(...userDocuments)
           pendingToolResults.push(...userToolResults)
-          pendingUserCachePoint = mergeCachePoint(pendingUserCachePoint, userCachePoint)
+          pendingUserCachePoint = userCachePoint
         }
       }
     } else if (msg.role === 'assistant') {
@@ -985,7 +966,7 @@ export function claudeToKiro(
       // Kiro 后端 schema 仅在响应输出中支持 assistantResponseMessage.reasoningContent，
       // 在请求 history 中传入此字段会触发 400 "Improperly formed request"
       // 当前消息的 thinking 开关由 additionalModelRequestFields.thinking 控制
-      const { content: assistantContent, toolUses } = extractClaudeAssistantContent(msg, toolNameRegistry)
+      const { content: assistantContent, toolUses, cachePoint: assistantCachePoint } = extractClaudeAssistantContent(msg, toolNameRegistry)
 
       // 如果有 pending 的 user 内容但还没添加到 history，先添加
       if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingUserDocuments.length > 0 || pendingToolResults.length > 0) {
@@ -1012,7 +993,8 @@ export function claudeToKiro(
 
       const assistantResponseMessage = {
         content: assistantContent,
-        ...(toolUses.length > 0 ? { toolUses } : {})
+        ...(toolUses.length > 0 ? { toolUses } : {}),
+        ...(assistantCachePoint ? { cachePoint: assistantCachePoint } : {})
       }
       history.push({ assistantResponseMessage })
     } else {
@@ -1022,11 +1004,11 @@ export function claudeToKiro(
 
   // 处理剩余的 pending 内容（如果最后几条都是 user 且不是 isLast）
   if (pendingUserContent.trim() || pendingUserImages.length > 0 || pendingUserDocuments.length > 0 || pendingToolResults.length > 0) {
+    if (!currentContent) currentCachePoint = pendingUserCachePoint
     currentContent = pendingUserContent + (currentContent ? '\n' + currentContent : '')
     images.unshift(...pendingUserImages)
     documents.unshift(...pendingUserDocuments)
     currentToolResults = [...pendingToolResults, ...currentToolResults]
-    currentCachePoint = mergeCachePoint(pendingUserCachePoint, currentCachePoint)
   }
 
   // 确保 history 以 user 开始（Kiro API 要求）
@@ -1044,14 +1026,25 @@ export function claudeToKiro(
     // 顶层 system 在普通会话完成清理后再注入，避免裁剪旧历史时丢失。
     // 官方 Kiro IDE: [Human(systemPrompt, forcedRole), AI("I will follow these instructions.", forcedRole)]
     const systemMessages: KiroHistoryMessage[] = []
-    if (systemPrompt) {
+    const systemBlocks = typeof request.system === 'string'
+        ? [{ type: 'text' as const, text: request.system, cache_control: undefined }]
+        : request.system || []
+    if (!Array.isArray(systemBlocks)) {
+        throw new Error('Claude system must be text or text blocks')
+    }
+    for (const block of systemBlocks) {
+        if (!block || block.type !== 'text' || typeof block.text !== 'string') {
+            throw new Error(`Unsupported Claude system content block: ${String(block?.type)}`)
+        }
+        const cachePoint = toKiroCachePoint(block.cache_control)
+        if (!block.text.trim()) continue
         systemMessages.push(
             {
                 userInputMessage: {
-                    content: systemPrompt,
+                    content: block.text,
                     userInputMessageContext: {},
                     origin,
-                    ...(systemCachePoint ? { cachePoint: systemCachePoint } : {})
+                    ...(cachePoint ? { cachePoint } : {})
                 }
             },
             {
@@ -1100,38 +1093,46 @@ export function claudeToKiro(
 }
 
 function extractClaudeInlineSystem(msg: ClaudeMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; toolResults: KiroToolResult[]; cachePoint?: KiroCachePoint } {
-    let cachePoint = toKiroCachePoint(msg.cache_control)
+    const messageCachePoint = toKiroCachePoint(msg.cache_control)
     if (typeof msg.content === 'string') {
-        return { content: msg.content, images: [], documents: [], toolResults: [], cachePoint }
+        return { content: msg.content, images: [], documents: [], toolResults: [], cachePoint: messageCachePoint }
     }
     if (!Array.isArray(msg.content)) {
         throw new Error('Claude system message content must be text or text blocks')
     }
     const textParts: string[] = []
-    for (const block of msg.content) {
+    let lastBlockCachePoint: KiroCachePoint | undefined
+    for (let index = 0; index < msg.content.length; index++) {
+        const block = msg.content[index]
         if (block.type !== 'text' || typeof block.text !== 'string') {
             throw new Error(`Unsupported Claude system content block: ${String(block.type)}`)
         }
-        textParts.push(block.text)
-        cachePoint = mergeCachePoint(cachePoint, toKiroCachePoint(block.cache_control))
+        if (block.text) textParts.push(block.text)
+        const blockCachePoint = toKiroCachePoint(block.cache_control)
+        if (index === msg.content.length - 1 && block.text.trim()) lastBlockCachePoint = blockCachePoint
     }
-    return { content: textParts.join('\n'), images: [], documents: [], toolResults: [], cachePoint }
+    return { content: textParts.join('\n'), images: [], documents: [], toolResults: [], cachePoint: messageCachePoint || lastBlockCachePoint }
 }
 
 function extractClaudeContent(msg: ClaudeMessage): { content: string; images: KiroImage[]; documents: KiroDocument[]; toolResults: KiroToolResult[]; cachePoint?: KiroCachePoint } {
   const images: KiroImage[] = []
   const documents: KiroDocument[] = []
   const toolResults: KiroToolResult[] = []
-  let content = ''
-  let cachePoint = toKiroCachePoint(msg.cache_control)
+  const textParts: string[] = []
+  const messageCachePoint = toKiroCachePoint(msg.cache_control)
+  let lastBlockCachePoint: KiroCachePoint | undefined
 
   if (typeof msg.content === 'string') {
-    content = msg.content
+    textParts.push(msg.content)
   } else if (Array.isArray(msg.content)) {
-    for (const block of msg.content) {
-      cachePoint = mergeCachePoint(cachePoint, toKiroCachePoint(block.cache_control))
+    for (let index = 0; index < msg.content.length; index++) {
+      const block = msg.content[index]
+      const blockCachePoint = toKiroCachePoint(block.cache_control)
+      if (index === msg.content.length - 1 && (block.type !== 'text' || !!block.text?.trim())) {
+        lastBlockCachePoint = blockCachePoint
+      }
       if (block.type === 'text' && block.text) {
-        content += block.text
+        textParts.push(block.text)
       } else if (block.type === 'image' && block.source?.type === 'base64') {
         const mediaTypeParts = block.source.media_type.split('/')
         const imageFormat = mediaTypeParts[1]
@@ -1198,25 +1199,32 @@ function extractClaudeContent(msg: ClaudeMessage): { content: string; images: Ki
     }
   }
 
-  return { content, images, documents, toolResults, cachePoint }
+  return { content: textParts.join('\n'), images, documents, toolResults, cachePoint: messageCachePoint || lastBlockCachePoint }
 }
 
 function extractClaudeAssistantContent(
   msg: ClaudeMessage,
   toolNameRegistry: ToolNameRegistry
-): { content: string; toolUses: KiroToolUse[]; reasoningContent?: KiroReasoningContent } {
+): { content: string; toolUses: KiroToolUse[]; cachePoint?: KiroCachePoint; reasoningContent?: KiroReasoningContent } {
   const toolUses: KiroToolUse[] = []
-  let content = ''
+  const textParts: string[] = []
+  const messageCachePoint = toKiroCachePoint(msg.cache_control)
+  let lastBlockCachePoint: KiroCachePoint | undefined
   let thinking = ''
   let signature: string | undefined
   let redactedContent: string | undefined
 
   if (typeof msg.content === 'string') {
-    content = msg.content
+    textParts.push(msg.content)
   } else if (Array.isArray(msg.content)) {
-    for (const block of msg.content) {
+    for (let index = 0; index < msg.content.length; index++) {
+      const block = msg.content[index]
+      const blockCachePoint = toKiroCachePoint(block.cache_control)
+      if (index === msg.content.length - 1 && (block.type !== 'text' || !!block.text?.trim())) {
+        lastBlockCachePoint = blockCachePoint
+      }
       if (block.type === 'text' && block.text) {
-        content += block.text
+        textParts.push(block.text)
       } else if (block.type === 'thinking' && block.thinking) {
         thinking += block.thinking
         signature = block.signature || signature
@@ -1236,6 +1244,8 @@ function extractClaudeAssistantContent(
     }
   }
 
+  let content = textParts.join('\n')
+  const cachePoint = messageCachePoint || lastBlockCachePoint
   // Kiro API 要求 content 非空
   if (!content.trim() && toolUses.length > 0) {
     content = ' '
@@ -1249,10 +1259,10 @@ function extractClaudeAssistantContent(
     if (redactedContent) {
       reasoningContent.redactedContent = redactedContent
     }
-    return { content, toolUses, reasoningContent }
+    return { content, toolUses, cachePoint, reasoningContent }
   }
 
-  return { content, toolUses }
+  return { content, toolUses, cachePoint }
 }
 
 function convertClaudeTools(
@@ -1280,6 +1290,21 @@ function convertClaudeTools(
 }
 
 // ============ Kiro -> Claude 转换 ============
+
+export function kiroToClaudeUsage(usage: KiroUsage): ClaudeResponse['usage'] {
+    const claudeUsage: ClaudeResponse['usage'] = {
+        input_tokens: usage.uncachedInputTokens
+            ?? Math.max(0, usage.inputTokens - (usage.cacheReadTokens ?? 0) - (usage.cacheWriteTokens ?? 0)),
+        output_tokens: usage.outputTokens
+    }
+    if (usage.cacheWriteTokens !== undefined) {
+        claudeUsage.cache_creation_input_tokens = usage.cacheWriteTokens
+    }
+    if (usage.cacheReadTokens !== undefined) {
+        claudeUsage.cache_read_input_tokens = usage.cacheReadTokens
+    }
+    return claudeUsage
+}
 
 export function kiroToClaudeResponse(
   content: string,
@@ -1323,16 +1348,7 @@ export function kiroToClaudeResponse(
     })
   }
 
-  const claudeUsage: ClaudeResponse['usage'] = {
-    input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens
-  }
-  if (usage.cacheWriteTokens) {
-    claudeUsage.cache_creation_input_tokens = usage.cacheWriteTokens
-  }
-  if (usage.cacheReadTokens) {
-    claudeUsage.cache_read_input_tokens = usage.cacheReadTokens
-  }
+  const claudeUsage = kiroToClaudeUsage(usage)
 
   const response: ClaudeResponse = {
     id: `msg_${uuidv4()}`,

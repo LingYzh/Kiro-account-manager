@@ -1,6 +1,6 @@
 {
   "name": "kiro-account-manager",
-  "version": "1.7.7",
+  "version": "1.7.8",
   "description": "Kiro Account Manager - Manage your Kiro accounts, usage and subscriptions",
   "main": "./out/main/index.js",
   "author": "Kiro",
@@ -20,7 +20,7 @@
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
-    "test:compat": "node test/compat-capabilities.mjs && node test/compat-responses.mjs && node test/compat-eventstream.mjs && node test/compat-context.mjs && node test/compat-request-errors.mjs && node test/e2e-fullsuite/compatibility.mjs",
+    "test:compat": "node test/compat-capabilities.mjs && node test/compat-responses.mjs && node test/compat-eventstream.mjs && node test/compat-context.mjs && node test/compat-request-errors.mjs && node test/compat-gateway.mjs && node test/compat-usage.mjs && node test/compat-client-config.mjs && node test/e2e-fullsuite/compatibility.mjs",
     "test:e2e": "node test/e2e-fullsuite/run.mjs",
     "test:e2e:only": "node test/e2e-fullsuite/run.mjs --only"
   },

@@ -85,6 +85,7 @@ interface ProxyConfig {
   multiAccountSelectionMode?: 'all' | 'groups'
   multiAccountGroupIds?: string[]
   modelMappings?: ModelMappingRule[]
+    claudeModelIdMappingEnabled?: boolean
   // Agent 模式 + Steering
   agentMode?: 'vibe' | 'spec'
   workspacePath?: string
@@ -149,6 +150,7 @@ export function ProxyPanel() {
     host: '127.0.0.1',
     enableMultiAccount: true,
     logRequests: true,
+    claudeModelIdMappingEnabled: true,
     clientDrivenToolExecution: true
   })
   const [stats, setStats] = useState<ProxyStats | null>(null)
@@ -1485,6 +1487,14 @@ export function ProxyPanel() {
         open={showModelsDialog}
         onOpenChange={setShowModelsDialog}
         isEn={isEn}
+        mappingEnabled={config.claudeModelIdMappingEnabled !== false}
+        onMappingEnabledChange={async (enabled) => {
+            const result = await window.api.proxyUpdateConfig({ claudeModelIdMappingEnabled: enabled })
+            if (!result.success) {
+                throw new Error(result.error || (isEn ? 'Failed to save model name setting' : '保存模型名称设置失败'))
+            }
+            setConfig(prev => ({ ...prev, claudeModelIdMappingEnabled: enabled }))
+        }}
         onOpenModelMapping={async () => {
           // 获取可用模型列表
           try {

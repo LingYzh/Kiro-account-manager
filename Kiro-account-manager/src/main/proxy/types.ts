@@ -197,6 +197,8 @@ export type OpenAIResponseOutputItem =
 
 // ============ Claude 兼容格式 ============
 export interface ClaudeRequest {
+    [key: string]: unknown
+    cache_control?: ClaudeCacheControl
   model: string
   messages: ClaudeMessage[]
   max_tokens: number
@@ -205,29 +207,32 @@ export interface ClaudeRequest {
   stream?: boolean
   system?: string | ClaudeSystemBlock[]
   tools?: ClaudeTool[]
-  tool_choice?: { type: string; name?: string }
+    tool_choice?: { type: string; name?: string; disable_parallel_tool_use?: boolean; [key: string]: unknown }
   thinking?: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive'; display?: string } | { type: 'disabled' }
   conversation_id?: string
   metadata?: Record<string, unknown>
   kiro_context?: KiroRequestContext
   anthropic_beta?: string[]
-  output_config?: { effort?: string; task_budget?: { type: 'tokens'; total: number; remaining?: number } }
+    output_config?: { effort?: string; format?: unknown; task_budget?: { type: 'tokens'; total: number; remaining?: number }; [key: string]: unknown }
   context_management?: { type?: string; [key: string]: unknown }
 }
 
 export interface ClaudeMessage {
+    [key: string]: unknown
   role: 'user' | 'assistant' | 'system'
   content: string | ClaudeContentBlock[]
   cache_control?: ClaudeCacheControl
 }
 
 export interface ClaudeSystemBlock {
+    [key: string]: unknown
   type: 'text'
   text: string
   cache_control?: ClaudeCacheControl
 }
 
 export interface ClaudeContentBlock {
+    [key: string]: unknown
   type: 'text' | 'image' | 'document' | 'tool_use' | 'tool_result' | 'thinking' | 'redacted_thinking'
   text?: string
   thinking?: string
@@ -248,6 +253,10 @@ export type ClaudeDocumentSource =
   | { type: 'text'; media_type?: string; data: string }
 
 export interface ClaudeTool {
+    [key: string]: unknown
+    type?: string
+    strict?: boolean
+    defer_loading?: boolean
   name: string
   description: string
   input_schema: unknown
@@ -255,6 +264,8 @@ export interface ClaudeTool {
 }
 
 export interface ClaudeCacheControl {
+    [key: string]: unknown
+    ttl?: string
   type: string
 }
 
@@ -398,6 +409,8 @@ export interface KiroRequestContext {
 }
 
 export interface KiroUsage {
+    /** Real uncached input when provided independently of the total. */
+    uncachedInputTokens?: number
   inputTokens: number
   outputTokens: number
   credits: number
@@ -569,6 +582,8 @@ export interface ProxyConfig {
   multiAccountGroupIds?: string[]
   // 模型映射规则
   modelMappings?: ModelMappingRule[]
+    // Claude Code 名称兼容：对外模型列表/一键配置使用短横版本名，默认开启。
+    claudeModelIdMappingEnabled?: boolean
 
   // ============ 安全 / 限流 / 可观测（v1.8 新增） ============
   /** 入站请求体最大字节数（默认 10MB）。超过返回 413 */

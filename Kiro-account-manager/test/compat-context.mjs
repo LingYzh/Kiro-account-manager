@@ -30,7 +30,7 @@ const isolatedDependencies = {
 const compiled = await build({
     stdin: {
         contents: `
-            export { claudeToKiro, openaiToKiro } from '../src/main/proxy/translator'
+            export { claudeToKiro, openaiToKiro, kiroToClaudeUsage } from '../src/main/proxy/translator'
             export { setEnableTokenBufferReserve, setPayloadSizeLimitKB, setTokenBufferReserve }
                 from '../src/main/proxy/kiroApi'
             export { PayloadSizeLimitError } from '../src/main/proxy/requestErrors'
@@ -51,7 +51,7 @@ bundledModule.paths = Module._nodeModulePaths(project)
 bundledModule.require = createRequire(virtualFile)
 bundledModule._compile(compiled.outputFiles[0].text, virtualFile)
 const {
-    claudeToKiro, openaiToKiro, setEnableTokenBufferReserve,
+    claudeToKiro, openaiToKiro, kiroToClaudeUsage, setEnableTokenBufferReserve,
     setPayloadSizeLimitKB, setTokenBufferReserve, setModelContextWindow,
     PayloadSizeLimitError
 } = bundledModule.exports
@@ -86,14 +86,91 @@ const first = claude([
     { role: 'user', content: 'Task two.' }
 ], { system: [{ type: 'text', text: 'Top rule.', cache_control: { type: 'ephemeral' } }] })
 const firstTexts = userTexts(first)
-assert.match(firstTexts[0], /^\[Context: Current time is /)
-assert.match(firstTexts[0], /Top rule\./)
+assert.equal(firstTexts[0], 'Top rule.')
 assert.deepEqual(first.conversationState.history[0].userInputMessage.cachePoint, { type: 'default' })
 assert.ok(firstTexts.some(text => text === 'Enter plan mode.\nTask one.'))
 assert.equal(first.conversationState.currentMessage.userInputMessage.content,
     'Exit plan mode.\nProceed with implementation.\nTask two.')
-assert.deepEqual(first.conversationState.currentMessage.userInputMessage.cachePoint, { type: 'default' })
+assert.equal(first.conversationState.currentMessage.userInputMessage.cachePoint, undefined)
 assertNoDirective(first)
+
+const stableInput = {
+    model: 'claude-sonnet-4.5', max_tokens: 512, conversation_id: 'stable-context-test',
+    system: [{ type: 'text', text: 'Stable rule.' }],
+    messages: [{ role: 'user', content: 'Same input.' }]
+}
+const stableSnapshot = structuredClone(stableInput)
+const stableFirst = claudeToKiro(stableInput)
+const stableSecond = claudeToKiro(stableInput)
+assert.deepEqual(stableInput, stableSnapshot)
+assert.deepEqual(stableFirst.conversationState.history, stableSecond.conversationState.history)
+assert.deepEqual(stableFirst.conversationState.currentMessage, stableSecond.conversationState.currentMessage)
+assert.equal(stableFirst.conversationState.conversationId, stableSecond.conversationState.conversationId)
+assert.doesNotMatch(JSON.stringify(stableFirst), /Current time is/)
+
+const splitSystem = claude([{ role: 'user', content: 'Question.' }], {
+    system: [
+        { type: 'text', text: 'Stable prefix.', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Dynamic suffix.' }
+    ]
+})
+assert.deepEqual(userTexts(splitSystem).slice(0, 2), ['Stable prefix.', 'Dynamic suffix.'])
+assert.deepEqual(splitSystem.conversationState.history[0].userInputMessage.cachePoint, { type: 'default' })
+assert.equal(splitSystem.conversationState.history[2].userInputMessage.cachePoint, undefined)
+assert.equal(splitSystem.conversationState.history[1].assistantResponseMessage.content, 'I will follow these instructions.')
+
+const emptySystem = claude([{ role: 'user', content: 'Question.' }], {
+    system: [
+        { type: 'text', text: '  ', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Valid rule.' }
+    ]
+})
+assert.equal(emptySystem.conversationState.history[0].userInputMessage.content, 'Valid rule.')
+assert.equal(emptySystem.conversationState.history[0].userInputMessage.cachePoint, undefined)
+assert.throws(() => claude([{ role: 'user', content: 'Question.' }], {
+    system: [{ type: 'image', text: 'Invalid.' }]
+}), /Unsupported Claude system content block/)
+
+const assistantCache = claude([
+    { role: 'user', content: 'Start.' },
+    { role: 'assistant', content: [
+        { type: 'text', text: 'First' },
+        { type: 'text', text: 'Second', cache_control: { type: 'ephemeral' } }
+    ] },
+    { role: 'user', content: 'Continue.' }
+])
+assert.equal(assistantCache.conversationState.history[1].assistantResponseMessage.content, 'First\nSecond')
+assert.deepEqual(assistantCache.conversationState.history[1].assistantResponseMessage.cachePoint, { type: 'default' })
+const assistantMessageCache = claude([
+    { role: 'user', content: 'Start.' },
+    { role: 'assistant', content: 'Done.', cache_control: { type: 'ephemeral' } },
+    { role: 'user', content: 'Continue.' }
+])
+assert.deepEqual(assistantMessageCache.conversationState.history[1].assistantResponseMessage.cachePoint, { type: 'default' })
+
+const internalAssistantCache = claude([
+    { role: 'user', content: 'Start.' },
+    { role: 'assistant', content: [
+        { type: 'text', text: 'Stable.', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'Dynamic.' }
+    ] },
+    { role: 'user', content: 'Continue.' }
+])
+assert.equal(internalAssistantCache.conversationState.history[1].assistantResponseMessage.cachePoint, undefined)
+
+const internalUserCache = claude([{ role: 'user', content: [
+    { type: 'text', text: 'Stable.', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'Dynamic.' }
+] }])
+assert.equal(internalUserCache.conversationState.currentMessage.userInputMessage.content, 'Stable.\nDynamic.')
+assert.equal(internalUserCache.conversationState.currentMessage.userInputMessage.cachePoint, undefined)
+
+const inlineCache = claude([
+    { role: 'system', content: [{ type: 'text', text: 'Scoped.', cache_control: { type: 'ephemeral' } }] },
+    { role: 'user', content: 'Dynamic user.' }
+])
+assert.equal(inlineCache.conversationState.currentMessage.userInputMessage.content, 'Scoped.\nDynamic user.')
+assert.equal(inlineCache.conversationState.currentMessage.userInputMessage.cachePoint, undefined)
 
 const middle = claude([
     { role: 'user', content: 'Start.' },
@@ -138,6 +215,34 @@ assert.match(userTexts(openai)[0], /OpenAI top rule\./)
 assert.match(userTexts(openai)[0], /OpenAI top rule\.\nKeep the boundary\./)
 assert.deepEqual(openai.conversationState.history[0].userInputMessage.cachePoint, { type: 'default' })
 assertNoDirective(openai)
+assert.doesNotMatch(JSON.stringify(openai), /Current time is/)
+const stableOpenAIInput = {
+    model: 'claude-sonnet-4.5', conversation_id: 'stable-openai-context-test',
+    messages: [{ role: 'system', content: 'Stable rule.' }, { role: 'user', content: 'Same input.' }]
+}
+const stableOpenAISnapshot = structuredClone(stableOpenAIInput)
+const stableOpenAIFirst = openaiToKiro(stableOpenAIInput)
+const stableOpenAISecond = openaiToKiro(stableOpenAIInput)
+assert.deepEqual(stableOpenAIInput, stableOpenAISnapshot)
+assert.deepEqual(stableOpenAIFirst.conversationState.history, stableOpenAISecond.conversationState.history)
+assert.deepEqual(stableOpenAIFirst.conversationState.currentMessage, stableOpenAISecond.conversationState.currentMessage)
+assert.equal(stableOpenAIFirst.conversationState.conversationId, stableOpenAISecond.conversationState.conversationId)
+
+assert.deepEqual(kiroToClaudeUsage({
+    inputTokens: 100, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 20
+}), {
+    input_tokens: 50, output_tokens: 12,
+    cache_creation_input_tokens: 20, cache_read_input_tokens: 30
+})
+assert.deepEqual(kiroToClaudeUsage({
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0
+}), {
+    input_tokens: 0, output_tokens: 0,
+    cache_creation_input_tokens: 0, cache_read_input_tokens: 0
+})
+assert.deepEqual(kiroToClaudeUsage({
+    inputTokens: 999, uncachedInputTokens: 0, outputTokens: 7
+}), { input_tokens: 0, output_tokens: 7 })
 
 // 默认关闭裁剪时，大历史与工具输出末尾必须保持字节级内容。
 const longHistory = 'history:' + 'h'.repeat(65000) + ':history-end'
@@ -171,6 +276,16 @@ const recentCallIndex = trimmedPair.findIndex(message =>
     message.assistantResponseMessage?.toolUses?.some(call => call.toolUseId === 'call_recent'))
 assert.ok(recentCallIndex >= 0)
 assert.equal(trimmedPair[recentCallIndex + 1].userInputMessage.userInputMessageContext.toolResults[0].toolUseId, 'call_recent')
+
+const callerPreserved = claudeToKiro({
+    model: 'claude-sonnet-4.5', max_tokens: 512, conversation_id: 'preserve-context-test',
+    messages: [
+        { role: 'user', content: 'old:' + 'p'.repeat(50000) },
+        { role: 'assistant', content: 'Old answer.' },
+        { role: 'user', content: 'Latest.' }
+    ]
+}, undefined, undefined, undefined, { preserveHistory: true })
+assert.ok(userTexts(callerPreserved).some(text => text.startsWith('old:')))
 
 // 中途 system 的作用域无法安全推断；即使开了裁剪也须完整保留，超 byte 限额则拒绝。
 const preserved = claude([

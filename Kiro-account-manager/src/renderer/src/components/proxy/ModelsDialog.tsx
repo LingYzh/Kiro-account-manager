@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { X, RefreshCw, Loader2, Cpu, FileText, Image, Hash, Sparkles, Zap, Shuffle, Brain, Database, AlertTriangle, Globe } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Badge } from '../ui'
 import { cn } from '@/lib/utils'
+import { ModelIdentityDetails } from './ModelIdentityDetails'
+import { ModelIdentitySettings } from './ModelIdentitySettings'
 
 interface ModelInfo {
   id: string
+    upstreamId?: string
+    clientId?: string
   name: string
   description: string
   inputTypes?: string[]
@@ -22,6 +26,8 @@ interface ModelsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   isEn: boolean
+    mappingEnabled: boolean
+    onMappingEnabledChange: (enabled: boolean) => Promise<void>
   onOpenModelMapping?: () => void
   mappingCount?: number
 }
@@ -30,6 +36,8 @@ export function ModelsDialog({
   open,
   onOpenChange,
   isEn,
+    mappingEnabled,
+    onMappingEnabledChange,
   onOpenModelMapping,
   mappingCount = 0
 }: ModelsDialogProps) {
@@ -37,6 +45,7 @@ export function ModelsDialog({
   const [loading, setLoading] = useState(false)
   const [fromCache, setFromCache] = useState(false)
   const [error, setError] = useState<string | null>(null)
+    const fetchSequence = useRef(0)
   // IP 限制提示是否显示 (用户点击关闭后持久化)
   const [showIpTip, setShowIpTip] = useState(() => {
     return localStorage.getItem('models_dialog_ip_tip_dismissed') !== '1'
@@ -47,29 +56,32 @@ export function ModelsDialog({
     setShowIpTip(false)
   }
 
-  const fetchModels = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const result = await window.api.proxyGetModels()
-      if (result.success) {
-        setModels(result.models)
-        setFromCache(result.fromCache || false)
-      } else {
-        setError(result.error || 'Failed to fetch models')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setLoading(false)
-    }
-  }
+    const fetchModels = useCallback(async () => {
+        const sequence = ++fetchSequence.current
+        setLoading(true)
+        setError(null)
+        try {
+            const result = await window.api.proxyGetModels()
+            if (sequence !== fetchSequence.current) return
+            if (result.success) {
+                setModels(result.models)
+                setFromCache(result.fromCache || false)
+            } else {
+                setError(result.error || 'Failed to fetch models')
+            }
+        } catch (err) {
+            if (sequence === fetchSequence.current) {
+                setError(err instanceof Error ? err.message : 'Unknown error')
+            }
+        } finally {
+            if (sequence === fetchSequence.current) setLoading(false)
+        }
+    }, [])
 
-  useEffect(() => {
-    if (open) {
-      fetchModels()
-    }
-  }, [open])
+    useEffect(() => {
+        if (open) void fetchModels()
+        return () => { fetchSequence.current++ }
+    }, [open, mappingEnabled, fetchModels])
 
   if (!open) return null
 
@@ -83,10 +95,10 @@ export function ModelsDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={() => onOpenChange(false)} />
-      <Card className="relative w-[850px] max-h-[85vh] shadow-2xl border-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200 glass-card-strong">
-        <CardHeader className="pb-4 border-b sticky top-0 z-10">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-xl flex items-center gap-3">
+      <Card className="relative flex w-[min(850px,calc(100vw-1.5rem))] max-h-[min(85vh,calc(100vh-1.5rem))] min-h-0 flex-col overflow-hidden border-0 shadow-2xl animate-in fade-in zoom-in-95 duration-200 glass-card-strong">
+        <CardHeader className="shrink-0 border-b pb-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <CardTitle className="flex min-w-0 items-center gap-3 text-xl">
               <div className="p-2 rounded-xl bg-primary/10">
                 <Cpu className="h-6 w-6 text-primary" />
               </div>
@@ -142,7 +154,14 @@ export function ModelsDialog({
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-4">
+        <CardContent className="min-h-0 flex-1 overflow-y-auto p-4">
+            <div className="mb-3">
+                <ModelIdentitySettings
+                    enabled={mappingEnabled}
+                    onEnabledChange={onMappingEnabledChange}
+                    isEn={isEn}
+                />
+            </div>
           {/* IP 限制提示横幅 (Pro+ 订阅但缺失高级模型) */}
           {showIpTip && (
             <div className="mb-3 rounded-xl border border-warning/30 bg-gradient-to-r from-warning/10 to-warning/5 p-3.5 relative">
@@ -180,7 +199,7 @@ export function ModelsDialog({
               </div>
             </div>
           )}
-          <div className="max-h-[calc(85vh-140px)] overflow-y-auto pr-2">
+          <div>
             {loading && models.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <div className="p-4 rounded-full bg-primary/10 mb-4">
@@ -204,12 +223,12 @@ export function ModelsDialog({
                 <p className="font-medium">{isEn ? 'No models available' : '暂无可用模型'}</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 {models.map((model, index) => (
                   <div 
                     key={model.id} 
                     className={cn(
-                      "group p-3 rounded-xl border hover:shadow-md hover:border-primary/30 transition-all duration-200",
+                      "group min-w-0 p-3 rounded-xl border hover:shadow-md hover:border-primary/30 transition-all duration-200",
                       index === 0 ? "border-primary/40 bg-primary/10" : "bg-background"
                     )}
                   >
@@ -219,15 +238,19 @@ export function ModelsDialog({
                         index === 0 ? "bg-primary" : "bg-muted-foreground/30"
                       )} />
                       <div className="flex-1 min-w-0">
-                        <code className="text-sm font-bold text-foreground">{model.id}</code>
-                        {model.name && model.name !== model.id && (
-                          <p className="text-[11px] text-primary/70 font-medium truncate">{model.name}</p>
-                        )}
+                        <p className="break-all text-sm font-bold text-foreground">{model.name || model.id}</p>
                       </div>
                     </div>
                     <p className="text-[11px] text-muted-foreground line-clamp-2 mb-2 pl-4">
                       {model.description || (isEn ? 'No description' : '无描述')}
                     </p>
+                    <div className="mb-3">
+                        <ModelIdentityDetails
+                            sourceId={model.upstreamId || model.id}
+                            clientId={model.clientId || model.id}
+                            isEn={isEn}
+                        />
+                    </div>
                     <div className="flex items-center justify-between pt-2 border-t border-border/50">
                       <div className="flex items-center gap-2">
                         <div className="flex items-center gap-1">

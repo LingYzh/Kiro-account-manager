@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, globalShortcut } from 'electron'
 import { autoUpdater } from 'electron-updater'
+import { shouldEnableAutoUpdater } from './autoUpdateAvailability'
 import * as machineIdModule from './machineId'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -45,6 +46,11 @@ import {
 // ============ 自动更新配置 ============
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = true
+const AUTO_UPDATE_UNAVAILABLE = '此构建不支持自动更新'
+
+function canUseAutoUpdater(): boolean {
+    return shouldEnableAutoUpdater(is.dev, process.resourcesPath)
+}
 
 function setupAutoUpdater(): void {
   // 检查更新出错
@@ -2449,11 +2455,13 @@ app.whenReady().then(async () => {
   initTray()
 
   // 初始化自动更新（仅生产环境）
-  if (!is.dev) {
+  if (canUseAutoUpdater()) {
     setupAutoUpdater()
     // 启动后延迟检查更新
     setTimeout(() => {
-      autoUpdater.checkForUpdates().catch(console.error)
+      if (canUseAutoUpdater()) {
+        autoUpdater.checkForUpdates().catch(console.error)
+      }
     }, 3000)
   }
 
@@ -2603,6 +2611,9 @@ app.whenReady().then(async () => {
     if (is.dev) {
       return { hasUpdate: false, message: '开发环境不支持更新检查' }
     }
+    if (!canUseAutoUpdater()) {
+      return { hasUpdate: false, error: AUTO_UPDATE_UNAVAILABLE }
+    }
     try {
       const result = await autoUpdater.checkForUpdates()
       return {
@@ -2621,6 +2632,9 @@ app.whenReady().then(async () => {
     if (is.dev) {
       return { success: false, message: '开发环境不支持更新' }
     }
+    if (!canUseAutoUpdater()) {
+      return { success: false, error: AUTO_UPDATE_UNAVAILABLE }
+    }
     try {
       await autoUpdater.downloadUpdate()
       return { success: true }
@@ -2632,6 +2646,10 @@ app.whenReady().then(async () => {
 
   // IPC: 安装更新并重启
   ipcMain.handle('install-update', () => {
+    if (!canUseAutoUpdater()) {
+      mainWindow?.webContents.send('update-error', AUTO_UPDATE_UNAVAILABLE)
+      return
+    }
     autoUpdater.quitAndInstall(false, true)
   })
 
@@ -6480,6 +6498,7 @@ app.whenReady().then(async () => {
         }
       }
       return await configureProxyClients({
+        claudeModelIdMappingEnabled: config.claudeModelIdMappingEnabled !== false,
         clients: input.clients,
         host: config.host,
         port: config.port,

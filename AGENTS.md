@@ -30,3 +30,5 @@
 - EventStream 必须校验两级 CRC 与帧/header 边界；损坏流和工具参数不能伪装为成功。Runtime 与 Generate 的结束契约需分开验证，详见 `.Codex/memory/kiro-protocol-audit.md`。
 - 默认不删除旧历史或截断工具结果；显式启用代理裁剪才允许有损处理，并保护顶层 system 与当前工具调用配对。Claude messages 内含 system 时整段历史禁止有损裁剪。
 - Claude 流在首段内容或有效空完成前保留真实 HTTP 错误状态；明确的上游上下文超限与 UTF-8 字节超限分别返回 400/413，不能伪造 token 数值或继续重放。详见 `.Codex/memory/context-preservation.md`。
+- Claude Code 请求按请求保留历史；会话身份隔离完整 API key、session、agent 与辅助请求类别。不能在模型上下文前注入每轮变化的时间戳，也不能把内部 cache checkpoint 后移到动态后缀。
+- Claude 缓存 usage 仅来自上游遥测，不能用本地模拟命中回填；未知与真实零需区分，JSON/SSE 的 input_tokens 均扣除真实缓存部分。已知不可执行的语义字段在上游请求前明确报错，详见 `.Codex/memory/gateway-cache-fidelity.md`。

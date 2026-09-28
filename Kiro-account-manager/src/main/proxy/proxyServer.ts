@@ -20,6 +20,7 @@ import type {
 import { AccountPool, ErrorType, classifyError } from './accountPool'
 import { callKiroApiStream, callKiroApi, getCachedKiroModels, resolveKiroModel, clearModelMetadataCache, isModelMetadataCached, type KiroModel } from './kiroApi'
 import { extractThinkingSchema, getThinkingConfig as parseThinkingConfig, type ThinkingConfig } from './modelCapabilities'
+import { matchesClientModelPattern, toClaudeClientModelId } from './modelIdentity'
 import { proxyLogger } from './logger'
 import { getKProxyService, generateDeviceId } from '../kproxy'
 import {
@@ -27,6 +28,7 @@ import {
   claudeToKiro,
   kiroToOpenaiResponse,
   kiroToClaudeResponse,
+    kiroToClaudeUsage,
   createOpenaiStreamChunk,
   createClaudeStreamEvent,
   responsesToOpenAIChat,
@@ -36,6 +38,8 @@ import { ToolNameRegistry } from './toolNameRegistry'
 import { ResponsesStream } from './responsesStream'
 import { promptCacheTracker } from './promptCacheTracker'
 import { getRequestErrorDetails } from './requestErrors'
+import { captureClaudeGatewayContext, buildClaudeConversationIdentity, cloneClaudeRequest } from './claudeGateway'
+import { inspectClaudeCapabilities } from './claudeCapabilities'
 import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument } from './steeringLoader'
 
 
@@ -318,7 +322,9 @@ export class ProxyServer {
       tokenRefreshBeforeExpiry: 300, // 5分钟提前刷新
       autoStart: false, // 是否自动启动
       clientDrivenToolExecution: true,
-      ...config
+      ...config,
+      sessionAffinityEnabled: config.sessionAffinityEnabled ?? true,
+        claudeModelIdMappingEnabled: config.claudeModelIdMappingEnabled ?? true
     }
     this.accountPool = new AccountPool()
     this.accountPool.setStrategy(this.config.accountSelectionStrategy || 'round-robin')
@@ -670,6 +676,7 @@ export class ProxyServer {
   }
 
   private validateClaudeCacheControls(request: ClaudeRequest): void {
+    this.validateCacheControl(request.cache_control)
     if (Array.isArray(request.system)) {
       request.system.forEach(block => this.validateCacheControl(block.cache_control))
     }
@@ -776,11 +783,19 @@ export class ProxyServer {
         throw new Error('messages must contain user, assistant, or system messages')
     }
     for (const message of request.messages) {
+        if (typeof message.content !== 'string' && !Array.isArray(message.content)) {
+            throw new Error('Claude message content must be text or content blocks')
+        }
         if (message.role !== 'system') continue
         if (typeof message.content !== 'string' && (!Array.isArray(message.content)
             || message.content.some(block => !block || block.type !== 'text' || typeof block.text !== 'string'))) {
             throw new Error('Claude system message content must be text or text blocks')
         }
+    }
+    if (request.system != null && typeof request.system !== 'string'
+        && (!Array.isArray(request.system) || request.system.some(block =>
+            !block || block.type !== 'text' || typeof block.text !== 'string'))) {
+        throw new Error('Claude system must be text or text blocks')
     }
     this.validateClaudeCacheControls(request)
 
@@ -1039,9 +1054,11 @@ export class ProxyServer {
   }
 
   // 获取可用模型列表
-  private static mapKiroModelToApi(m: KiroModel) {
+    private static mapKiroModelToApi(m: KiroModel, mappingEnabled = true) {
     return {
       id: m.modelId,
+        upstreamId: m.modelId,
+        clientId: mappingEnabled ? toClaudeClientModelId(m.modelId) : m.modelId,
       name: m.modelName,
       description: m.description,
       inputTypes: m.supportedInputTypes,
@@ -1075,7 +1092,7 @@ export class ProxyServer {
     ]
     const merged = [...kiroModels, ...hiddenModels.filter(m => !modelIds.has(m.modelId))]
 
-    return { models: merged.map(ProxyServer.mapKiroModelToApi), fromCache }
+    return { models: merged.map(model => ProxyServer.mapKiroModelToApi(model, this.config.claudeModelIdMappingEnabled !== false)), fromCache }
   }
 
   // 检查 Token 是否需要刷新
@@ -1266,7 +1283,18 @@ export class ProxyServer {
       if (!refreshed) {
         // 刷新失败，如果启用多账号才尝试获取下一个账号
         if (this.config.enableMultiAccount) {
-          return this.accountPool.getNextAccount()
+            const excluded = new Set(this.accountPool.getAllAccounts()
+                .filter(candidate => candidate.id === account.id || !isAllowed(candidate))
+                .map(candidate => candidate.id))
+            const replacement = this.accountPool.getNextAccount(excluded)
+            if (!replacement) return null
+            if (this.isTokenExpiringSoon(replacement) && !await this.refreshToken(replacement, signal)) return null
+            const refreshedReplacement = this.accountPool.getAccount(replacement.id)
+            if (refreshedReplacement) {
+                this.syncKProxyDeviceId(refreshedReplacement)
+                this.rememberAffinity(sessionHint, refreshedReplacement.id)
+            }
+            return refreshedReplacement ?? null
         }
         return null
       }
@@ -1312,7 +1340,8 @@ export class ProxyServer {
     apiCall: (acc: ProxyAccount, endpointIndex: number) => Promise<T>,
     _path: string,
     signal?: AbortSignal,
-    canRetry: () => boolean = () => true
+    canRetry: () => boolean = () => true,
+    apiKeyId?: string
   ): Promise<{ result: T; account: ProxyAccount }> {
     const maxRetries = this.config.maxRetries || 3
     const retryDelay = this.config.retryDelayMs || 1000
@@ -1321,6 +1350,15 @@ export class ProxyServer {
     let endpointIndex = 0
     // 本次请求累计已尝试的账号 ID，避免重试时循环命中已经失败过的账号
     const triedIds = new Set<string>([account.id])
+    const allowedIds = this.getAllowedAccountIds(apiKeyId)
+    const allowedGroups = this.config.multiAccountSelectionMode === 'groups'
+        ? new Set(this.config.multiAccountGroupIds || []) : undefined
+    for (const candidate of this.accountPool.getAllAccounts()) {
+        if ((allowedIds && !allowedIds.has(candidate.id))
+            || (allowedGroups && !allowedGroups.has(candidate.groupId || '__ungrouped__'))) {
+            triedIds.add(candidate.id)
+        }
+    }
     /** 切到下一个可用账号；多账号模式带 triedIds 排除，单账号场景退化为旧逻辑 */
     const switchToNextAccount = (): ProxyAccount | null => {
       if (this.config.enableMultiAccount) {
@@ -1721,9 +1759,7 @@ export class ProxyServer {
       }
 
       // 检查源模型是否匹配（支持通配符 *）
-      const sourcePattern = rule.sourceModel.replace(/\*/g, '.*')
-      const regex = new RegExp(`^${sourcePattern}$`, 'i')
-      if (!regex.test(requestedModel)) continue
+        if (!matchesClientModelPattern(requestedModel, rule.sourceModel)) continue
 
       // 匹配成功，根据类型选择目标模型
       const validTargets = rule.targetModels.filter(t => t.trim())
@@ -1810,7 +1846,7 @@ export class ProxyServer {
 
     // CORS 预检
     if (method === 'OPTIONS') {
-      this.setCorsHeaders(res)
+      this.setCorsHeaders(req, res)
       res.writeHead(204)
       res.end()
       req.off('aborted', abortRequest)
@@ -1820,7 +1856,7 @@ export class ProxyServer {
     }
 
     try {
-      this.setCorsHeaders(res)
+      this.setCorsHeaders(req, res)
 
       // P0-4 IP 访问控制（健康检查也走，防止扫描器）
       const ipCheck = this.isClientIPAllowed(clientIP)
@@ -2055,6 +2091,7 @@ export class ProxyServer {
       'disableTools', 'payloadSizeLimitKB', 'enableTokenBufferReserve',
       'tokenBufferReserve', 'autoSwitchOnQuotaExhausted', 'accountSelectionStrategy',
       'multiAccountSelectionMode', 'multiAccountGroupIds', 'modelMappings',
+        'claudeModelIdMappingEnabled',
       'maxRequestBodyBytes', 'allowedIPs', 'deniedIPs',
       'rateLimitPerKeyPerMinute', 'sessionAffinityEnabled',
       'keepAliveTimeoutMs', 'headersTimeoutMs', 'recentRequestsLimit',
@@ -2080,11 +2117,18 @@ export class ProxyServer {
   }
 
   // 设置 CORS 头
-  private setCorsHeaders(res: http.ServerResponse): void {
+  private setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch')
-    res.setHeader('Access-Control-Expose-Headers', 'x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens')
+    const requestedHeaders = String(req.headers['access-control-request-headers'] ?? '').split(',')
+        .map(header => header.trim().toLowerCase())
+        .filter(header => /^(anthropic-|x-claude-code-)[a-z0-9-]+$/.test(header))
+    res.setHeader('Access-Control-Allow-Headers', [
+        'Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch',
+        ...new Set(requestedHeaders)
+    ].join(', '))
+    res.setHeader('Vary', 'Access-Control-Request-Headers')
+    res.setHeader('Access-Control-Expose-Headers', 'x-request-id, x-kiro-compatibility, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens')
   }
 
   private isAnthropicPath(path: string): boolean {
@@ -2104,24 +2148,6 @@ export class ProxyServer {
     if (status === 404) return 'not_found_error'
     if (status === 429) return 'rate_limit_error'
     return 'api_error'
-  }
-
-  private buildClaudeUsage(
-    usage: { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number },
-    simulatedCache?: { cacheCreationInputTokens: number; cacheReadInputTokens: number }
-  ): { input_tokens?: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } {
-    // 优先使用 Kiro 后端返回的真实 cache tokens，否则用模拟器的值
-    const cacheWrite = usage.cacheWriteTokens || simulatedCache?.cacheCreationInputTokens || 0
-    const cacheRead = usage.cacheReadTokens || simulatedCache?.cacheReadInputTokens || 0
-    // Kiro 的 inputTokens 是全量（含缓存），Anthropic API 规范中 input_tokens 不含缓存部分
-    // 需要扣除 cache tokens 避免客户端双重计费
-    const adjustedInput = Math.max(0, usage.inputTokens - cacheWrite - cacheRead)
-    return {
-      input_tokens: adjustedInput,
-      output_tokens: usage.outputTokens,
-      ...(cacheWrite ? { cache_creation_input_tokens: cacheWrite } : {}),
-      ...(cacheRead ? { cache_read_input_tokens: cacheRead } : {})
-    }
   }
 
   private estimateTokenCount(value: unknown): number {
@@ -2460,7 +2486,19 @@ export class ProxyServer {
 
     this.throwIfResponseClosed(res, signal)
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ object: 'list', data: allModels }))
+    // Client model discovery must use IDs Claude Code can recognize. Keep the
+    // original root/metadata and continue accepting raw Kiro IDs on requests.
+    const clientModels = new Map<string, ClientModel & { display_name: string }>()
+    const dynamicModelIds = new Set(dynamicModels.map(model => model.id))
+    for (const model of allModels) {
+        const id = this.config.claudeModelIdMappingEnabled !== false ? toClaudeClientModelId(model.id) : model.id
+        // Dot-form IDs are also preferred by inbound mapModelId normalization.
+        // A hidden fallback must never overwrite a real catalog entry.
+        if (!clientModels.has(id) || (id !== model.id && dynamicModelIds.has(model.id))) {
+            clientModels.set(id, { ...model, id, display_name: model.name })
+        }
+    }
+    res.end(JSON.stringify({ object: 'list', data: Array.from(clientModels.values()) }))
   }
 
   // 处理 OpenAI Chat Completions 请求
@@ -2898,7 +2936,9 @@ export class ProxyServer {
   private async handleClaudeMessages(req: http.IncomingMessage, res: http.ServerResponse, signal?: AbortSignal): Promise<void> {
     const body = await this.readBody(req, signal)
     this.throwIfAborted(signal)
-    const request: ClaudeRequest = JSON.parse(body)
+    const incomingRequest: ClaudeRequest = JSON.parse(body)
+    const gateway = captureClaudeGatewayContext(req.headers)
+    const request = cloneClaudeRequest(incomingRequest)
     this.logRequestMilestone(res, 'Claude request received', {
         model: request.model,
         stream: !!request.stream,
@@ -2915,14 +2955,22 @@ export class ProxyServer {
     })
     const matchedApiKey = (req as unknown as { matchedApiKey?: import('./types').ApiKey }).matchedApiKey
 
-    // 提取 session hint（用于稳定 conversationId），拼入 API Key hash 隔离不同用户
-    const rawHint = ProxyServer.extractSessionHint(req, request)
-    if (!request.conversation_id && rawHint) {
-      const keyPrefix = matchedApiKey?.id?.slice(0, 8) || 'default'
-      request.conversation_id = `${keyPrefix}:${rawHint}`
-    }
-    // P1-8 会话粘性使用 conversation_id 作为粘性 key（已包含 API Key 前缀）
-    const affinityHint = request.conversation_id
+    const affinityHint = buildClaudeConversationIdentity(
+        gateway, ProxyServer.extractSessionHint(req, incomingRequest), matchedApiKey?.id)
+    request.conversation_id = affinityHint
+    const conversionOptions = { preserveHistory: gateway.preserveHistory }
+    this.logRequestMilestone(res, 'Claude gateway context', {
+        isClaudeCode: gateway.isClaudeCode,
+        preserveHistory: gateway.preserveHistory,
+        hasVersion: gateway.version !== undefined,
+        hasBeta: gateway.beta !== undefined,
+        hasAgent: gateway.agentId !== undefined,
+        hasParentAgent: gateway.parentAgentId !== undefined,
+        hasPrompt: gateway.promptId !== undefined,
+        requestClass: gateway.requestClass,
+        compaction: gateway.compaction,
+        contextCompacted: gateway.contextCompacted
+    })
 
     // 应用模型映射
     request.model = this.applyModelMapping(request.model, matchedApiKey?.id, request, true)
@@ -2934,7 +2982,13 @@ export class ProxyServer {
 
     let processedRequest: ClaudeRequest
     try {
-      processedRequest = await this.resolveClaudeHttpImages(this.prepareClaudeRequest(request), signal)
+      const preparedRequest = this.prepareClaudeRequest(request)
+      const diagnostics = inspectClaudeCapabilities(request)
+      if (diagnostics.length > 0) {
+          this.logRequestMilestone(res, 'Claude compatibility degradation', { features: diagnostics })
+          res.setHeader('x-kiro-compatibility', diagnostics.join(', '))
+      }
+      processedRequest = await this.resolveClaudeHttpImages(preparedRequest, signal)
     } catch (error) {
       if (this.isAbortError(error, signal)) return
       this.recordRequestFailed()
@@ -2972,22 +3026,7 @@ export class ProxyServer {
       }
 
       const claudeThinkingConfig = await this.getThinkingConfig(account, processedRequest.model, signal)
-      const kiroPayload = claudeToKiro(processedRequest, account.profileArn, toolNameRegistry, claudeThinkingConfig)
-
-      // 构建 prompt cache profile（用于模拟缓存 usage）
-      const estimatedInputTokens = Math.max(1, Math.round(JSON.stringify(kiroPayload).length * 0.3))
-      const cacheProfile = promptCacheTracker.buildClaudeProfile(
-        processedRequest.system,
-        processedRequest.messages,
-        processedRequest.tools,
-        estimatedInputTokens,
-        processedRequest.model
-      )
-      const cacheUsage = promptCacheTracker.compute(account.id, cacheProfile)
-
-      if (cacheProfile) {
-        proxyLogger.info('ProxyServer', `Prompt cache: ${cacheProfile.breakpoints.length} breakpoints, creation=${cacheUsage.cacheCreationInputTokens}, read=${cacheUsage.cacheReadInputTokens}`)
-      }
+      const kiroPayload = claudeToKiro(processedRequest, account.profileArn, toolNameRegistry, claudeThinkingConfig, conversionOptions)
 
       // 记录请求详情到日志
       if (this.config.logRequests) {
@@ -3012,18 +3051,19 @@ export class ProxyServer {
 
       if (request.stream) {
         // 流式响应（流式不使用重试机制，错误由流处理）
-        await this.handleClaudeStream(res, account, kiroPayload, request.model, startTime, 0, undefined, false, 0, matchedApiKey, toolNameRegistry, signal,
-          cacheProfile ? { ...cacheUsage, cacheProfile, accountId: account.id } : undefined)
+        await this.handleClaudeStream(res, account, kiroPayload, request.model, startTime, 0, undefined, false, 0, matchedApiKey, toolNameRegistry, signal)
       } else {
         // 非流式响应（带重试机制）
         const { result, account: usedAccount } = await this.callWithRetry(
           account,
           async (acc) => {
-            const retryPayload = claudeToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal))
+            const retryPayload = claudeToKiro(processedRequest, acc.profileArn, toolNameRegistry, await this.getThinkingConfig(acc, processedRequest.model, signal), conversionOptions)
             return callKiroApi(acc, retryPayload, signal)
           },
           '/v1/messages',
-          signal
+          signal,
+          () => true,
+          matchedApiKey?.id
         )
         const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
         if (this.config.logRequests) {
@@ -3037,24 +3077,28 @@ export class ProxyServer {
             })
         }
 
-        // 用缓存模拟的 usage 覆盖（如果有 cache profile）
-        if (cacheProfile && cacheUsage) {
-          if (cacheUsage.cacheCreationInputTokens > 0) response.usage.cache_creation_input_tokens = cacheUsage.cacheCreationInputTokens
-          if (cacheUsage.cacheReadInputTokens > 0) response.usage.cache_read_input_tokens = cacheUsage.cacheReadInputTokens
-          promptCacheTracker.update(usedAccount.id, cacheProfile)
-        }
-
         this.throwIfResponseClosed(res, signal)
+        this.rememberAffinity(affinityHint, usedAccount.id)
         this.recordRequestSuccess()
         this.stats.totalTokens += result.usage.inputTokens + result.usage.outputTokens
         this.stats.inputTokens += result.usage.inputTokens
         this.stats.outputTokens += result.usage.outputTokens
+        this.stats.cacheReadTokens += result.usage.cacheReadTokens ?? 0
+        this.stats.cacheWriteTokens += result.usage.cacheWriteTokens ?? 0
+        this.stats.reasoningTokens += result.usage.reasoningTokens ?? 0
+        this.stats.totalCredits += result.usage.credits ?? 0
+        this.events.onCreditsUpdate?.(this.stats.totalCredits)
+        this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
+        if (matchedApiKey) {
+            this.recordApiKeyUsage(matchedApiKey.id, result.usage.credits ?? 0,
+                result.usage.inputTokens, result.usage.outputTokens, request.model, '/v1/messages')
+        }
         this.accountPool.recordSuccess(usedAccount.id, result.usage.inputTokens + result.usage.outputTokens)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(response))
         const respTime = Date.now() - startTime
-        this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
+        this.events.onResponse?.({ path: '/v1/messages', model: request.model, status: 200, tokens: result.usage.inputTokens + result.usage.outputTokens, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, cacheWriteTokens: result.usage.cacheWriteTokens, reasoningTokens: result.usage.reasoningTokens, credits: result.usage.credits, responseTime: respTime })
         this.recordRequest({ path: '/v1/messages', model: request.model, accountId: usedAccount.id, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, credits: result.usage.credits, responseTime: respTime, success: true })
       }
     } catch (error) {
@@ -3075,8 +3119,7 @@ export class ProxyServer {
     contentBlockIndex: number = 0,
     matchedApiKey?: import('./types').ApiKey,
     toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
-    signal?: AbortSignal,
-    simulatedCacheUsage?: { cacheCreationInputTokens: number; cacheReadInputTokens: number; cacheProfile?: unknown; accountId?: string }
+    signal?: AbortSignal
   ): Promise<void> {
     const id = msgId || `msg_${uuidv4()}`
     let currentBlockIndex = contentBlockIndex
@@ -3316,27 +3359,23 @@ export class ProxyServer {
           this.events.onCreditsUpdate?.(this.stats.totalCredits)
           this.events.onTokensUpdate?.(this.stats.inputTokens, this.stats.outputTokens)
           this.accountPool.recordSuccess(account.id, usage.inputTokens + usage.outputTokens)
-          this.stats.cacheReadTokens += usage.cacheReadTokens || simulatedCacheUsage?.cacheReadInputTokens || 0
-          this.stats.cacheWriteTokens += usage.cacheWriteTokens || simulatedCacheUsage?.cacheCreationInputTokens || 0
+          this.stats.cacheReadTokens += usage.cacheReadTokens ?? 0
+          this.stats.cacheWriteTokens += usage.cacheWriteTokens ?? 0
           this.stats.reasoningTokens += usage.reasoningTokens || 0
           const respTime = Date.now() - startTime
-          this.events.onResponse?.({ path: '/v1/messages', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens || simulatedCacheUsage?.cacheReadInputTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: respTime })
+          this.events.onResponse?.({ path: '/v1/messages', model, status: 200, tokens: usage.inputTokens + usage.outputTokens, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens, reasoningTokens: usage.reasoningTokens, credits: usage.credits, responseTime: respTime })
           this.recordRequest({ path: '/v1/messages', model, accountId: account.id, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, credits: usage.credits, responseTime: respTime, success: true })
           // 记录 API Key 用量
           if (matchedApiKey) {
             this.recordApiKeyUsage(matchedApiKey.id, usage.credits || 0, usage.inputTokens, usage.outputTokens, model, '/v1/messages')
           }
 
-          // 成功后更新 prompt cache tracker
-          if (simulatedCacheUsage?.cacheProfile && simulatedCacheUsage?.accountId) {
-            promptCacheTracker.update(simulatedCacheUsage.accountId, simulatedCacheUsage.cacheProfile as any)
-          }
           // 发送 message_delta（包含完整 usage 信息）
           const hasToolCalls = pendingToolCalls.size > 0
           const stopReason = hasToolCalls ? 'tool_use' : 'end_turn'
           const messageDelta = createClaudeStreamEvent('message_delta', {
             delta: { stop_reason: stopReason, stop_sequence: null } as any,
-            usage: this.buildClaudeUsage(usage, simulatedCacheUsage)
+            usage: kiroToClaudeUsage(usage)
           })
           res.write(`event: message_delta\ndata: ${JSON.stringify(messageDelta)}\n\n`)
           // 发送 message_stop
@@ -3553,8 +3592,8 @@ export class ProxyServer {
     const entry = this.sessionAffinity.get(sessionHint)
     if (entry) {
       const account = this.accountPool.getAccount(entry.accountId)
-      // 校验账号仍可用且未被封禁
-      if (account && !this.accountPool.isSuspended(account) && account.isAvailable !== false) {
+      // 粘性不能绕过过期、配额、冷却和断路器检查。
+      if (Date.now() - entry.lastAt <= 600_000 && account && this.accountPool.isEligibleForAffinity(account)) {
         entry.lastAt = Date.now()
         return account
       }

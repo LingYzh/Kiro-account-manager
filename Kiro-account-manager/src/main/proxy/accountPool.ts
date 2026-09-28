@@ -191,6 +191,12 @@ export class AccountPool {
     return Array.from(this.accounts.values())
   }
 
+    // Sticky routing uses the same eligibility checks without probabilistic retries.
+    isEligibleForAffinity(account: ProxyAccount): boolean {
+        const now = Date.now()
+        return (account.cooldownUntil ?? 0) <= now && this.isAccountAvailable(account, now, false)
+    }
+
   // 检查账号是否可用（断路器 + 指数退避 + 概率重试）
   // allowProbabilisticRetry=false 用于统计/计数场景：冷却中一律视为不可用，
   // 避免 Math.random() 让 availableCount / getQuotaStatus 的数字来回抖动

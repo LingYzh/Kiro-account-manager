@@ -2,6 +2,7 @@ import { constants, existsSync } from 'fs'
 import { access, copyFile, mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
+import { toClaudeClientModelId } from './modelIdentity'
 
 export type ProxyClientTarget = 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
 type OpenCodeInputModality = 'text' | 'image' | 'pdf'
@@ -15,6 +16,7 @@ export interface ProxyClientModel {
 }
 
 export interface ConfigureProxyClientsInput {
+    claudeModelIdMappingEnabled?: boolean
   clients: ProxyClientTarget[]
   host: string
   port: number
@@ -34,6 +36,7 @@ export interface ProxyClientConfigResult {
 }
 
 interface ProxyClientContext {
+    claudeModelIdMappingEnabled: boolean
   proxyOrigin: string
   openaiBaseUrl: string
   apiKey: string
@@ -233,20 +236,22 @@ function ensureObjectField(target: Record<string, unknown>, key: string): Record
 }
 
 async function configureClaudeCode(context: ProxyClientContext): Promise<Omit<ProxyClientConfigResult, 'client' | 'success' | 'error'>> {
-  const path = getClaudeSettingsPath()
-  const config = await readJsonObject(path)
-  const env = ensureObjectField(config, 'env')
-  env.ANTHROPIC_BASE_URL = context.proxyOrigin
-  env.ANTHROPIC_AUTH_TOKEN = context.apiKey
-  env.ANTHROPIC_API_KEY = context.apiKey
-  env.ANTHROPIC_MODEL = context.modelId
-  // 默认模型映射：让 Claude Code 的 haiku/opus/sonnet 快捷调用都走代理支持的模型
-  const haikuModel = context.models.find(m => m.id.toLowerCase().includes('haiku'))?.id || 'claude-haiku-4.5'
-  const opusModel = context.models.find(m => m.id.toLowerCase().includes('opus'))?.id || context.modelId
-  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel
-  env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel
-  env.ANTHROPIC_DEFAULT_SONNET_MODEL = context.modelId
-  return { paths: [path], backupPaths: await writeJsonObject(path, config) }
+    const path = getClaudeSettingsPath()
+    const config = await readJsonObject(path)
+    const env = ensureObjectField(config, 'env')
+    const clientModelId = (id: string): string => context.claudeModelIdMappingEnabled ? toClaudeClientModelId(id) : id
+    env.ANTHROPIC_BASE_URL = context.proxyOrigin
+    env.ANTHROPIC_AUTH_TOKEN = context.apiKey
+    env.ANTHROPIC_API_KEY = context.apiKey
+    env.ANTHROPIC_MODEL = clientModelId(context.modelId)
+    env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1'
+    // 默认模型映射：让 Claude Code 的 haiku/opus/sonnet 快捷调用都走代理支持的模型
+    const haikuModel = context.models.find(m => m.id.toLowerCase().includes('haiku'))?.id || 'claude-haiku-4.5'
+    const opusModel = context.models.find(m => m.id.toLowerCase().includes('opus'))?.id || context.modelId
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = clientModelId(haikuModel)
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = clientModelId(opusModel)
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = clientModelId(context.modelId)
+    return { paths: [path], backupPaths: await writeJsonObject(path, config) }
 }
 
 function openCodeModelConfig(model: ProxyClientModel): Record<string, unknown> {
@@ -516,6 +521,7 @@ export async function configureProxyClients(input: ConfigureProxyClientsInput): 
   const modelMap = new Map((input.models?.length ? input.models : [{ id: modelId, name: input.modelName || modelId }]).map(model => [model.id, model]))
   if (!modelMap.has(modelId)) modelMap.set(modelId, { id: modelId, name: input.modelName || modelId })
   const context: ProxyClientContext = {
+    claudeModelIdMappingEnabled: input.claudeModelIdMappingEnabled !== false,
     proxyOrigin,
     openaiBaseUrl: `${proxyOrigin.replace(/\/$/, '')}/v1`,
     apiKey,

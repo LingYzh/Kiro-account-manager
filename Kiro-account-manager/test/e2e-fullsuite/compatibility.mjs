@@ -9,7 +9,7 @@ const project = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const virtualFile = resolve(project, 'test/compatibility-bundle.cjs')
 const compiled = await build({
     stdin: {
-        contents: "export { ProxyServer } from './src/main/proxy/proxyServer'; export { clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve } from './src/main/proxy/kiroApi'",
+        contents: "export { ProxyServer } from './src/main/proxy/proxyServer'; export { clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve, setTokenBufferReserve, setModelContextWindow } from './src/main/proxy/kiroApi'",
         resolveDir: project,
         loader: 'ts'
     },
@@ -40,7 +40,7 @@ bundledModule.filename = virtualFile
 bundledModule.paths = Module._nodeModulePaths(project)
 bundledModule.require = createRequire(virtualFile)
 bundledModule._compile(compiled.outputFiles[0].text, virtualFile)
-const { ProxyServer, clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve } = bundledModule.exports
+const { ProxyServer, clearAllCaches, resolveKiroModel, setPayloadSizeLimitKB, setEnableTokenBufferReserve, setTokenBufferReserve, setModelContextWindow } = bundledModule.exports
 
 const rawFetch = globalThis.fetch
 const output = console.log.bind(console)
@@ -174,23 +174,36 @@ globalThis.fetch = async function fixtureFetch(url, options = {}) {
 async function start(accounts = ['a']) {
     if (proxy) await proxy.stop(0)
     clearAllCaches()
-    proxy = new ProxyServer({ port: 0, logRequests: false, maxRetries: 3, retryDelayMs: 1 })
-    for (const id of accounts) proxy.getAccountPool().addAccount({ id, accessToken: `fixture-${id}`, profileArn: `profile-${id}`, region: 'us-east-1' })
-    await proxy.start()
-    base = `http://127.0.0.1:${proxy.server.address().port}`
+    // Windows can allocate an ephemeral port that Fetch forbids (for example
+    // 6000 or 6667). Probe /health and retry only that specific allocation.
+    for (let attempt = 0; attempt < 20; attempt++) {
+        proxy = new ProxyServer({ port: 0, logRequests: false, maxRetries: 3, retryDelayMs: 1 })
+        for (const id of accounts) proxy.getAccountPool().addAccount({ id, accessToken: `fixture-${id}`, profileArn: `profile-${id}`, region: 'us-east-1' })
+        await proxy.start()
+        base = `http://127.0.0.1:${proxy.server.address().port}`
+        try {
+            const probe = await rawFetch(`${base}/health`, { signal: AbortSignal.timeout(3000) })
+            assert.equal(probe.status, 200, 'fixture health check')
+            return
+        } catch (error) {
+            if (error?.cause?.message !== 'bad port') throw error
+            await proxy.stop(0)
+        }
+    }
+    throw new Error('Could not allocate a Fetch-compatible fixture port')
 }
 
-async function post(path, body) {
+async function post(path, body, headers = {}) {
     const response = await rawFetch(`${base}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10000)
     })
     const text = await response.text()
     const contentType = response.headers.get('content-type') || ''
     const json = contentType.includes('application/json') ? JSON.parse(text) : undefined
-    return { status: response.status, text, json }
+    return { status: response.status, text, json, headers: response.headers }
 }
 
 function events(text) {
@@ -313,11 +326,415 @@ try {
         const positions = markers.map(marker => orderedText.indexOf(marker))
         assert.ok(positions.every(position => position >= 0), 'every system and conversation marker must reach Kiro')
         assert.deepEqual(positions, [...positions].sort((left, right) => left - right), 'Kiro payload text must retain the client order')
-        assert.equal(history[2].userInputMessage.content, 'FULL_PLAN_MARKER\nNORMAL_USER_MARKER')
-        assert.equal(history[3].assistantResponseMessage.content, 'ASSISTANT_MARKER')
+        assert.equal(history[0].userInputMessage.content, 'FULL_PLAN_MARKER\nNORMAL_USER_MARKER')
+        assert.equal(history[1].assistantResponseMessage.content, 'ASSISTANT_MARKER')
         assert.equal(payload.conversationState.currentMessage.userInputMessage.content, 'SPARSE_MARKER\nEXIT_MARKER\nFINAL_USER_MARKER')
-        assert.deepEqual(payload.conversationState.currentMessage.userInputMessage.cachePoint, { type: 'default' })
+        assert.equal(payload.conversationState.currentMessage.userInputMessage.cachePoint, undefined)
         assert.equal(serialized.includes('execution_discipline'), false)
+    })
+    await check('Claude conversation identity keeps session, agent, and request lanes separate', async () => {
+        upstreamMode = 'text'
+        const body = {
+            model: 'claude-sonnet-4.5', max_tokens: 100,
+            messages: [{ role: 'user', content: 'First prompt.' }]
+        }
+        const session = { 'x-claude-code-session-id': 'fixture-session' }
+        async function identity(extraHeaders = {}, changedBody = body) {
+            const result = await post('/v1/messages', changedBody, { ...session, ...extraHeaders })
+            assert.equal(result.status, 200, result.text)
+            return requests.at(-1).payload.conversationState.conversationId
+        }
+        const main = await identity({ 'x-claude-code-request-class': 'main' })
+        assert.equal(await identity({ 'x-claude-code-context-compacted': 'true' }, {
+            ...body, messages: [{ role: 'user', content: 'Changed prompt after compaction.' }]
+        }), main)
+        assert.equal(await identity({ 'x-claude-code-request-class': 'workflow' }), main)
+        const agent = await identity({ 'x-claude-code-agent-id': 'agent-1' })
+        assert.notEqual(agent, main)
+        assert.equal(await identity({ 'x-claude-code-agent-id': 'agent-1', 'x-claude-code-request-class': 'subagent' }), agent)
+        assert.notEqual(await identity({ 'x-claude-code-request-class': 'auxiliary' }), main)
+        assert.notEqual(await identity({ 'x-claude-code-request-class': 'compaction' }), main)
+
+        const stableBody = {
+            ...body, conversation_id: 'explicit-fixture-id',
+            system: [
+                { type: 'text', text: 'Stable system.', cache_control: { type: 'ephemeral' } },
+                { type: 'text', text: 'Dynamic system.' }
+            ]
+        }
+        const first = await post('/v1/messages', stableBody)
+        assert.equal(first.status, 200, first.text)
+        const firstPayload = requests.at(-1).payload
+        const second = await post('/v1/messages', stableBody)
+        assert.equal(second.status, 200, second.text)
+        const secondPayload = requests.at(-1).payload
+        assert.deepEqual(firstPayload.conversationState.history, secondPayload.conversationState.history)
+        assert.deepEqual(firstPayload.conversationState.currentMessage, secondPayload.conversationState.currentMessage)
+        assert.equal(firstPayload.conversationState.conversationId, secondPayload.conversationState.conversationId)
+        assert.equal(firstPayload.conversationState.history[0].userInputMessage.content, 'Stable system.')
+        assert.deepEqual(firstPayload.conversationState.history[0].userInputMessage.cachePoint, { type: 'default' })
+        assert.equal(firstPayload.conversationState.history[2].userInputMessage.content, 'Dynamic system.')
+        assert.equal(firstPayload.conversationState.history[2].userInputMessage.cachePoint, undefined)
+    })
+    await check('Claude CORS preflight permits future Anthropic and Claude Code headers', async () => {
+        const response = await rawFetch(`${base}/v1/messages`, {
+            method: 'OPTIONS',
+            headers: { 'access-control-request-headers': 'anthropic-future-flag, x-claude-code-future-flag' }
+        })
+        assert.ok(response.ok)
+        const allowed = response.headers.get('access-control-allow-headers') || ''
+        assert.match(allowed, /anthropic-future-flag/)
+        assert.match(allowed, /x-claude-code-future-flag/)
+    })
+    await check('Claude rejects unsupported semantic fields before upstream and reports cache limitations', async () => {
+        upstreamMode = 'text'
+        const baseBody = {
+            model: 'claude-sonnet-4.5', max_tokens: 100,
+            messages: [{ role: 'user', content: 'Hello.' }]
+        }
+        const unsupported = [
+            { context_management: { edits: [{ type: 'clear_tool_uses_20250919' }] } },
+            { output_config: { format: { type: 'json_schema' } } },
+            { tool_choice: { type: 'tool', name: 'lookup' } },
+            { tools: [{ type: 'web_search_20250305', name: 'web_search' }] },
+            { messages: [{ role: 'user', content: [{ type: 'tool_reference', tool_name: 'lookup' }] }] },
+            { system: [null] },
+            { system: [{ type: 'image', text: 'Invalid.' }] }
+        ]
+        for (const fields of unsupported) {
+            for (const stream of [false, true]) {
+                const before = requests.length
+                const metadataBefore = metadataRequests.length
+                const result = await post('/v1/messages', { ...baseBody, ...fields, stream })
+                assert.equal(result.status, 400, result.text)
+                assert.equal(result.json?.error?.type, 'invalid_request_error', result.text)
+                assert.equal(requests.length, before)
+                assert.equal(metadataRequests.length, metadataBefore)
+                if (fields.tools?.[0]?.type === 'web_search_20250305') {
+                    assert.match(result.json?.error?.message || '', /Input tag 'web_search_20250305'/)
+                }
+            }
+        }
+        const allowed = await post('/v1/messages', {
+            ...baseBody,
+            context_management: { edits: [] },
+            future_extension: { value: true },
+            system: [{ type: 'text', text: 'Cache for one hour.', cache_control: { type: 'ephemeral', ttl: '1h' } }]
+        })
+        assert.equal(allowed.status, 200, allowed.text)
+        assert.match(allowed.headers.get('x-kiro-compatibility') || '', /cache_ttl_not_supported/)
+    })
+    await check('Claude cache fields and stats require upstream telemetry', async () => {
+        upstreamMode = 'text'
+        const body = {
+            model: 'claude-sonnet-4.5', max_tokens: 100,
+            system: [{ type: 'text', text: 'Cached instruction.', cache_control: { type: 'ephemeral' } }],
+            messages: [{ role: 'user', content: 'Hello.' }]
+        }
+        const before = proxy.getStats()
+        try {
+            upstreamFrames = [frame('assistantResponseEvent', { content: 'Hello fixture' })]
+            for (const stream of [false, true]) {
+                for (let repeat = 0; repeat < 2; repeat++) {
+                    const result = await post('/v1/messages', { ...body, stream })
+                    assert.equal(result.status, 200, result.text)
+                    const usage = stream
+                        ? events(result.text).find(event => event.type === 'message_delta')?.usage
+                        : result.json.usage
+                    assert.equal(usage.cache_read_input_tokens, undefined)
+                    assert.equal(usage.cache_creation_input_tokens, undefined)
+                }
+            }
+        } finally {
+            upstreamFrames = undefined
+        }
+        const after = proxy.getStats()
+        assert.equal(after.cacheReadTokens, before.cacheReadTokens)
+        assert.equal(after.cacheWriteTokens, before.cacheWriteTokens)
+    })
+    await check('Claude JSON and SSE usage report real cache breakdown and zeros', async () => {
+        upstreamMode = 'text'
+        const body = { model: 'claude-sonnet-4.5', max_tokens: 100, messages: [{ role: 'user', content: 'Usage.' }] }
+        const beforeCredits = proxy.getStats().totalCredits
+        try {
+            for (const [read, write, uncached, total] of [[200, 30, 100, 337], [0, 0, 100, 107]]) {
+                upstreamFrames = [
+                    frame('assistantResponseEvent', { content: 'Hello fixture' }),
+                    frame('messageMetadataEvent', { tokenUsage: {
+                        uncachedInputTokens: uncached, cacheReadInputTokens: read,
+                        cacheWriteInputTokens: write, outputTokens: 7, totalTokens: total
+                    } }),
+                    frame('meteringEvent', { usage: 1.25 })
+                ]
+                for (const stream of [false, true]) {
+                    const result = await post('/v1/messages', { ...body, stream })
+                    assert.equal(result.status, 200, result.text)
+                    const usage = stream
+                        ? events(result.text).find(event => event.type === 'message_delta')?.usage
+                        : result.json.usage
+                    assert.equal(usage.input_tokens, uncached)
+                    assert.equal(usage.cache_read_input_tokens, read)
+                    assert.equal(usage.cache_creation_input_tokens, write)
+                    assert.equal(usage.output_tokens, 7)
+                }
+            }
+        } finally {
+            upstreamFrames = undefined
+        }
+        assert.equal(proxy.getStats().totalCredits - beforeCredits, 5)
+    })
+    await check('Claude Code keeps history and tool results under explicit proxy trimming', async () => {
+        upstreamMode = 'text'
+        const oldText = 'old:' + Array.from({ length: 3000 }, (_, index) =>
+            `fixture history line ${index}: varied words for token estimation.\n`).join('')
+        const body = {
+            model: 'claude-sonnet-4.5', max_tokens: 100,
+            tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+            messages: [
+                { role: 'user', content: oldText },
+                { role: 'assistant', content: 'Old answer.' },
+                { role: 'user', content: 'Use lookup.' },
+                { role: 'assistant', content: [{ type: 'tool_use', id: 'trim-call', name: 'lookup', input: {} }] },
+                { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'trim-call', content: 'Retained result.' }] }
+            ]
+        }
+        try {
+            setModelContextWindow('claude-sonnet-4.5', 12000)
+            setTokenBufferReserve(5000)
+            setEnableTokenBufferReserve(true)
+            const cc = await post('/v1/messages', body, { 'x-claude-code-session-id': 'trim-fixture' })
+            assert.equal(cc.status, 200, cc.text)
+            const preserved = requests.at(-1).payload.conversationState
+            assert.ok(preserved.history.some(message => message.userInputMessage?.content === oldText))
+            assert.equal(preserved.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].content[0].text, 'Retained result.')
+            const ordinary = await post('/v1/messages', body)
+            assert.equal(ordinary.status, 200, ordinary.text)
+            const trimmed = requests.at(-1).payload.conversationState
+            assert.equal(trimmed.history.some(message => message.userInputMessage?.content === oldText), false)
+            assert.equal(trimmed.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].content[0].text, 'Retained result.')
+        } finally {
+            setEnableTokenBufferReserve(false)
+            setTokenBufferReserve(20000)
+            setModelContextWindow('claude-sonnet-4.5', 200000)
+        }
+    })
+    await check('Claude discovery IDs preserve Kiro identity and schema on cold and warm requests', async () => {
+        const opus = {
+            modelId: 'claude-opus-5.5', modelName: 'Claude Opus 5.5', description: 'Synthetic Opus fixture',
+            tokenLimits: { maxInputTokens: 1000000, maxOutputTokens: 64000 },
+            additionalModelRequestFieldsSchema: {
+                type: 'object', properties: {
+                    thinking: { type: 'object', properties: { type: { enum: ['adaptive'] } } },
+                    output_config: { type: 'object', properties: { effort: { enum: ['low', 'medium', 'high', 'xhigh', 'max'] } } }
+                }
+            }
+        }
+        try {
+            modelMetadata = [
+                opus,
+                { modelId: 'claude-3-7-sonnet', modelName: 'Dynamic legacy model', tokenLimits: { maxInputTokens: 123456 }, additionalModelRequestFieldsSchema: reasoningSchema },
+                ...models.filter(model => model.modelId !== 'claude-3.7-sonnet'),
+                { modelId: 'custom-claude-opus-5.5', modelName: 'Custom deployment' }
+            ]
+            clearAllCaches()
+            const beforeMetadata = metadataRequests.length
+            const request = { model: 'claude-opus-5-5', max_tokens: 100, messages: [{ role: 'user', content: 'hello' }], thinking: { type: 'adaptive' }, output_config: { effort: 'xhigh' } }
+            const cold = await post('/v1/messages', request)
+            assert.equal(cold.status, 200, cold.text)
+            assert.equal(cold.json.model, request.model)
+            assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, opus.modelId)
+            assert.deepEqual(requests.at(-1).payload.additionalModelRequestFields, { thinking: { type: 'adaptive' }, output_config: { effort: 'xhigh' } })
+            assert.equal(metadataRequests.length, beforeMetadata + 1, 'no discovery request is required to resolve capabilities')
+
+            const response = await rawFetch(`${base}/v1/models?limit=1000`)
+            assert.equal(response.status, 200)
+            const { data } = await response.json()
+            assert.equal(data.filter(model => model.id === 'claude-opus-5-5').length, 1)
+            assert.ok(!data.some(model => model.id === opus.modelId), 'picker must not offer the unrecognized dot alias')
+            const discovered = data.find(model => model.id === request.model)
+            assert.equal(discovered.display_name, opus.modelName)
+            assert.equal(discovered.root, opus.modelId)
+            assert.equal(discovered.context_length, 1000000)
+            assert.deepEqual(discovered.thinkingEfforts, ['low', 'medium', 'high', 'xhigh', 'max'])
+            const legacy = data.find(model => model.id === 'claude-3-7-sonnet')
+            assert.equal(legacy.root, 'claude-3-7-sonnet', 'hidden dot fallback cannot replace a real dynamic entry')
+            assert.equal(legacy.context_length, 123456)
+            assert.deepEqual(legacy.thinkingEfforts, ['low', 'high'])
+            assert.ok(data.some(model => model.id === 'gpt-5.6-sol'))
+            assert.ok(data.some(model => model.id === 'custom-claude-opus-5.5'), 'custom names are not guessed')
+
+            for (const model of [opus.modelId, request.model, 'claude-opus-5-5-20260901']) {
+                const result = await post('/v1/messages', { ...request, model, stream: true })
+                assert.equal(result.status, 200, result.text)
+                const stream = events(result.text)
+                assert.equal(stream.find(event => event.type === 'message_start').message.model, model)
+                assertClaudeStreamLifecycle(stream)
+                assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, opus.modelId)
+                assert.equal(requests.at(-1).payload.additionalModelRequestFields.output_config.effort, 'xhigh')
+            }
+            assert.equal(proxy.getConfig().claudeModelIdMappingEnabled, true, 'old configurations default to compatibility enabled')
+            const uiModels = await proxy.getAvailableModels()
+            assert.deepEqual(
+                Object.fromEntries(['id', 'upstreamId', 'clientId'].map(key => [key, uiModels.models.find(model => model.id === opus.modelId)[key]])),
+                { id: opus.modelId, upstreamId: opus.modelId, clientId: request.model }
+            )
+            proxy.updateConfig({ claudeModelIdMappingEnabled: false })
+            assert.equal(proxy.getConfig().claudeModelIdMappingEnabled, false)
+            assert.equal(proxy.needsRestart(), false, 'name compatibility is a hot setting')
+            const rawDiscovery = await (await rawFetch(`${base}/v1/models`)).json()
+            assert.ok(rawDiscovery.data.some(model => model.id === opus.modelId))
+            assert.ok(!rawDiscovery.data.some(model => model.id === request.model))
+            const rawUiModels = await proxy.getAvailableModels()
+            assert.equal(rawUiModels.models.find(model => model.id === opus.modelId).clientId, opus.modelId)
+            const existingClient = await post('/v1/messages', request)
+            assert.equal(existingClient.status, 200, 'turning discovery spelling off must not break configured clients')
+            assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, opus.modelId)
+            proxy.updateConfig({ claudeModelIdMappingEnabled: true })
+            // A recognized spelling must not fabricate support for another account/schema.
+            modelMetadata = [{ ...opus, additionalModelRequestFieldsSchema: undefined }]
+            clearAllCaches()
+            const unsupported = await post('/v1/messages', request)
+            assert.equal(unsupported.status, 200, unsupported.text)
+            assert.equal(Object.hasOwn(requests.at(-1).payload, 'additionalModelRequestFields'), false)
+        } finally {
+            modelMetadata = models
+            proxy.updateConfig({ claudeModelIdMappingEnabled: true })
+            clearAllCaches()
+        }
+    })
+    await check('Claude account affinity follows session and moves after quota exhaustion', async () => {
+        upstreamMode = 'text'
+        await start(['a', 'b'])
+        proxy.updateConfig({ sessionAffinityEnabled: true, enableMultiAccount: true })
+        const body = { model: 'claude-sonnet-4.5', max_tokens: 100, messages: [{ role: 'user', content: 'Affinity.' }] }
+        const headers = { 'x-claude-code-session-id': 'affinity-fixture', 'x-claude-code-agent-id': 'agent-a' }
+        try {
+            const first = await post('/v1/messages', body, headers)
+            assert.equal(first.status, 200, first.text)
+            const firstAccount = requests.at(-1).authorization
+            const repeat = await post('/v1/messages', body, headers)
+            assert.equal(repeat.status, 200, repeat.text)
+            assert.equal(requests.at(-1).authorization, firstAccount)
+            const exhaustedId = firstAccount.endsWith('fixture-a') ? 'a' : 'b'
+            const replacementId = exhaustedId === 'a' ? 'b' : 'a'
+            proxy.getAccountPool().updateAccount(exhaustedId, {
+                quotaUsed: 100, quotaLimit: 100,
+                quotaExhaustedAt: Date.now(), quotaResetAt: Date.now() + 3600000
+            })
+            const switched = await post('/v1/messages', body, headers)
+            assert.equal(switched.status, 200, switched.text)
+            assert.equal(requests.at(-1).authorization, `Bearer fixture-${replacementId}`)
+            const stable = await post('/v1/messages', body, headers)
+            assert.equal(stable.status, 200, stable.text)
+            assert.equal(requests.at(-1).authorization, `Bearer fixture-${replacementId}`)
+        } finally {
+            await start()
+        }
+    })
+    await check('Claude retry binds the successful account and respects API key account limits', async () => {
+        await start(['a', 'b', 'c'])
+        proxy.updateConfig({
+            sessionAffinityEnabled: true, enableMultiAccount: true,
+            apiKeys: [
+                { id: 'bound', key: 'fixture-bound', enabled: true, usage: { totalRequests: 0, totalCredits: 0, totalInputTokens: 0, totalOutputTokens: 0, daily: {} } },
+                { id: 'only-a', key: 'fixture-only-a', enabled: true, usage: { totalRequests: 0, totalCredits: 0, totalInputTokens: 0, totalOutputTokens: 0, daily: {} } }
+            ],
+            apiKeyAccountBindings: { bound: ['a', 'b'], 'only-a': ['a'] }
+        })
+        const body = { model: 'claude-sonnet-4.5', max_tokens: 100, messages: [{ role: 'user', content: 'Retry.' }] }
+        upstreamMode = 'failover'
+        try {
+            const before = requests.length
+            const headers = { 'x-api-key': 'fixture-bound', 'x-claude-code-session-id': 'retry-session' }
+            const first = await post('/v1/messages', body, headers)
+            assert.equal(first.status, 200, first.text)
+            const attempts = requests.slice(before).map(request => request.authorization)
+            assert.ok(attempts.includes('Bearer fixture-a'))
+            assert.equal(attempts.at(-1), 'Bearer fixture-b')
+            assert.equal(attempts.includes('Bearer fixture-c'), false)
+            const repeatBefore = requests.length
+            const repeat = await post('/v1/messages', body, headers)
+            assert.equal(repeat.status, 200, repeat.text)
+            assert.deepEqual(requests.slice(repeatBefore).map(request => request.authorization), ['Bearer fixture-b'])
+
+            const restrictedBefore = requests.length
+            const restricted = await post('/v1/messages', body, {
+                'x-api-key': 'fixture-only-a', 'x-claude-code-session-id': 'restricted-session'
+            })
+            assert.notEqual(restricted.status, 200)
+            assert.ok(requests.slice(restrictedBefore).every(request => request.authorization === 'Bearer fixture-a'))
+        } finally {
+            upstreamMode = 'text'
+            await start()
+        }
+    })
+    await check('Claude sticky affinity expires and rejects cooldown and backoff accounts', async () => {
+        await start(['a', 'b'])
+        proxy.updateConfig({ sessionAffinityEnabled: true })
+        const pool = proxy.getAccountPool()
+        try {
+            proxy.rememberAffinity('ttl-fixture', 'a')
+            proxy.sessionAffinity.get('ttl-fixture').lastAt = Date.now() - 600001
+            assert.equal(proxy.pickAccountWithAffinity('ttl-fixture'), null)
+            assert.equal(proxy.sessionAffinity.has('ttl-fixture'), false)
+
+            proxy.rememberAffinity('cooldown-fixture', 'a')
+            pool.updateAccount('a', { cooldownUntil: Date.now() + 60000 })
+            assert.equal(proxy.pickAccountWithAffinity('cooldown-fixture'), null)
+            pool.updateAccount('a', { cooldownUntil: undefined })
+
+            proxy.rememberAffinity('backoff-fixture', 'a')
+            pool.updateAccount('a', { errorCount: 1, lastUsed: Date.now() })
+            assert.equal(proxy.pickAccountWithAffinity('backoff-fixture'), null)
+        } finally {
+            await start()
+        }
+    })
+    await check('Claude token refresh fallback respects bindings and refreshes replacement once', async () => {
+        await start(['a', 'b', 'c'])
+        proxy.updateConfig({
+            sessionAffinityEnabled: true,
+            enableMultiAccount: true,
+            apiKeyAccountBindings: { bound: ['a', 'c'] }
+        })
+        const refreshCalls = []
+        proxy.isTokenExpiringSoon = account => account.id === 'a' || account.id === 'c'
+        proxy.refreshToken = async account => {
+            refreshCalls.push(account.id)
+            return account.id === 'c'
+        }
+        try {
+            const selected = await proxy.getAvailableAccount(undefined, 'refresh-fixture', 'bound')
+            assert.equal(selected?.id, 'c')
+            assert.deepEqual(refreshCalls, ['a', 'c'])
+            assert.equal(proxy.pickAccountWithAffinity('refresh-fixture')?.id, 'c')
+        } finally {
+            await start()
+        }
+    })
+    await check('explicit Claude conversation IDs remain isolated across API keys', async () => {
+        upstreamMode = 'text'
+        const apiKey = (id) => ({
+            id, name: id, key: `test-key-${id}`, format: 'simple', enabled: true,
+            createdAt: Date.now(),
+            usage: { totalRequests: 0, totalCredits: 0, totalInputTokens: 0, totalOutputTokens: 0, daily: {} }
+        })
+        proxy.updateConfig({ apiKeys: [apiKey('tenant-a'), apiKey('tenant-b')] })
+        const body = {
+            model: 'claude-sonnet-4.5', max_tokens: 100,
+            conversation_id: 'shared-explicit-id', messages: [{ role: 'user', content: 'Tenant identity.' }]
+        }
+        try {
+            const a = await post('/v1/messages', body, { 'x-api-key': 'test-key-tenant-a' })
+            assert.equal(a.status, 200, a.text)
+            const aId = requests.at(-1).payload.conversationState.conversationId
+            const b = await post('/v1/messages', body, { 'x-api-key': 'test-key-tenant-b' })
+            assert.equal(b.status, 200, b.text)
+            const bId = requests.at(-1).payload.conversationState.conversationId
+            assert.notEqual(aId, bId)
+        } finally {
+            proxy.updateConfig({ apiKeys: [] })
+        }
     })
     await check('Claude rejects an unknown inline message role before generating upstream requests', async () => {
         const before = requests.length
@@ -569,6 +986,13 @@ try {
             const claudeDefault = await post('/v1/messages', { model: 'claude-haiku-4.5', max_tokens: 100, messages: [{ role: 'user', content: 'hello' }] })
             assert.equal(claudeDefault.status, 200, claudeDefault.text)
             assert.deepEqual(requests.at(-1).payload.additionalModelRequestFields, { reasoning: { effort: 'high' } })
+
+            proxy.updateConfig({ modelMappings: [{ ...modelMapping, sourceModel: 'claude-haiku-4.5' }] })
+            const canonicalDefault = await post('/v1/messages', { model: 'claude-haiku-4-5', max_tokens: 100, messages: [{ role: 'user', content: 'hello' }] })
+            assert.equal(canonicalDefault.status, 200, canonicalDefault.text)
+            assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, 'gpt-5.6-luna')
+            assert.deepEqual(requests.at(-1).payload.additionalModelRequestFields, { reasoning: { effort: 'high' } })
+            proxy.updateConfig({ modelMappings: [modelMapping] })
 
             const claudeExplicitLow = await post('/v1/messages', { model: 'claude-haiku-4.5', max_tokens: 100, messages: [{ role: 'user', content: 'hello' }], output_config: { effort: 'low' } })
             assert.equal(claudeExplicitLow.status, 200, claudeExplicitLow.text)

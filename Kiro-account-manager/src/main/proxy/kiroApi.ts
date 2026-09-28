@@ -455,10 +455,6 @@ export function injectSystemPrompts(
 ): string {
   let result = content
   
-  // 注入时间戳
-  const timestamp = new Date().toISOString()
-  const timestampPrompt = `Current time: ${timestamp}`
-  
   // 注入 Thinking 模式（必须在最前面）
   if (thinkingEnabled) {
     result = THINKING_MODE_PROMPT + '\n\n' + result
@@ -468,9 +464,6 @@ export function injectSystemPrompts(
   if (isAgentic) {
     result = result + '\n\n' + AGENTIC_SYSTEM_PROMPT
   }
-  
-  // 注入时间戳
-  result = timestampPrompt + '\n\n' + result
   
   return result
 }
@@ -950,7 +943,7 @@ export function buildKiroPayload(
   additionalModelRequestFields?: Record<string, unknown>
 ): KiroPayload {
   // 构建当前消息
-  const finalContent = content.trim() || (toolResults.length > 0 ? '' : 'Continue')
+  const finalContent = content.trim() ? content : (toolResults.length > 0 ? '' : 'Continue')
   
   const currentUserInputMessage: KiroUserInputMessage = {
     content: finalContent,
@@ -1502,8 +1495,13 @@ export function estimateTokens(text: string): number {
   return countTokens(text)
 }
 
+function isValidUsageToken(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
 // 解析 AWS Event Stream 二进制格式
-async function parseEventStream(
+/** @internal Exported for offline EventStream protocol regression tests. */
+export async function parseEventStream(
   body: ReadableStream<Uint8Array>,
   onChunk: (text: string, toolUse?: KiroToolUse, isThinking?: boolean, reasoningSignature?: string, redactedContent?: string) => void | Promise<void>,
   onComplete: (usage: KiroUsage) => void,
@@ -1523,8 +1521,6 @@ async function parseEventStream(
     inputTokens: 0, 
     outputTokens: 0, 
     credits: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
     reasoningTokens: 0
   }
   
@@ -1533,7 +1529,11 @@ async function parseEventStream(
   // 累积输出文本内容，用于 tiktoken 精确计算 output tokens
   let collectedOutputText = ''
   // 是否已拿到 Kiro 真实 tokenUsage（最高优先级，锁定后不再被 contextUsage/tiktoken 覆盖）
-  let hasRealTokenUsage = false
+    let hasRealInputTokens = false
+    let hasRealOutputTokens = false
+    let explicitInputTokens: number | undefined
+    let totalTokens: number | undefined
+    let uncachedInputTokens: number | undefined
   
   // 流式事件聚合计数（logStreamEvents 开启时，结束后输出摘要而非逐条输出）
   const streamEventCounts: Record<string, number> = {}
@@ -1547,6 +1547,33 @@ async function parseEventStream(
     // 字符系数兜底（针对 payload JSON 经验值 0.42）
     usage.inputTokens = Math.max(1, Math.round(inputChars * 0.42))
   }
+
+    const applyRealInputTokens = (): void => {
+        const uncached = uncachedInputTokens
+        const cacheRead = usage.cacheReadTokens
+        const cacheWrite = usage.cacheWriteTokens
+        if (uncached !== undefined && cacheRead !== undefined && cacheWrite !== undefined) {
+            const breakdownTotal = uncached + cacheRead + cacheWrite
+            if (Number.isFinite(breakdownTotal)) {
+                usage.inputTokens = breakdownTotal
+                hasRealInputTokens = true
+                return
+            }
+        }
+        if (explicitInputTokens !== undefined) {
+            // Explicit inputTokens already represents the full input count, including any cache tokens.
+            usage.inputTokens = explicitInputTokens
+            hasRealInputTokens = true
+            return
+        }
+        if (totalTokens !== undefined && hasRealOutputTokens) {
+            const derivedInputTokens = totalTokens - usage.outputTokens
+            if (isValidUsageToken(derivedInputTokens)) {
+                usage.inputTokens = derivedInputTokens
+                hasRealInputTokens = true
+            }
+        }
+    }
   
   // Tool use 状态跟踪 - 用于累积输入片段
   let currentToolUse: ToolUseState | null = null
@@ -1856,55 +1883,55 @@ async function parseEventStream(
               proxyLogger.info('Kiro', 'messageMetadataEvent', metadata)
               
               // 检查 tokenUsage 对象
-              if (metadata.tokenUsage) {
+              if (metadata.tokenUsage && typeof metadata.tokenUsage === 'object' && !Array.isArray(metadata.tokenUsage)) {
                 const tokenUsage = metadata.tokenUsage
                 proxyLogger.info('Kiro', 'tokenUsage', tokenUsage)
-                // 计算 inputTokens = uncachedInputTokens + cacheReadInputTokens + cacheWriteInputTokens
-                const uncached = tokenUsage.uncachedInputTokens || 0
-                const cacheRead = tokenUsage.cacheReadInputTokens || 0
-                const cacheWrite = tokenUsage.cacheWriteInputTokens || 0
-                const calculatedInput = uncached + cacheRead + cacheWrite
-                
-                if (calculatedInput > 0) {
-                  usage.inputTokens = calculatedInput
-                  hasRealTokenUsage = true  // 真实值，锁定不再被 contextUsage/tiktoken 覆盖
+                if (isValidUsageToken(tokenUsage.uncachedInputTokens)) {
+                  uncachedInputTokens = tokenUsage.uncachedInputTokens
+                  usage.uncachedInputTokens = tokenUsage.uncachedInputTokens
                 }
-                if (tokenUsage.outputTokens) usage.outputTokens = tokenUsage.outputTokens
-                if (tokenUsage.totalTokens) {
-                  // 如果有 totalTokens，用它来推算
-                  if (usage.inputTokens === 0 && usage.outputTokens > 0) {
-                    usage.inputTokens = tokenUsage.totalTokens - usage.outputTokens
-                    hasRealTokenUsage = true
-                  }
+                if (isValidUsageToken(tokenUsage.cacheReadInputTokens)) {
+                  usage.cacheReadTokens = tokenUsage.cacheReadInputTokens
                 }
-                
-                // 保存 cache tokens
-                usage.cacheReadTokens = cacheRead
-                usage.cacheWriteTokens = cacheWrite
+                if (isValidUsageToken(tokenUsage.cacheWriteInputTokens)) {
+                  usage.cacheWriteTokens = tokenUsage.cacheWriteInputTokens
+                }
+                if (isValidUsageToken(tokenUsage.outputTokens)) {
+                  usage.outputTokens = tokenUsage.outputTokens
+                  hasRealOutputTokens = true
+                }
+                if (isValidUsageToken(tokenUsage.totalTokens)) {
+                  totalTokens = tokenUsage.totalTokens
+                }
+                applyRealInputTokens()
                 
                 // 记录上下文使用百分比
-                if (tokenUsage.contextUsagePercentage !== undefined) {
+                if (isValidUsageToken(tokenUsage.contextUsagePercentage)) {
                   proxyLogger.info('Kiro', 'Context usage: ' + tokenUsage.contextUsagePercentage.toFixed(2) + '%')
                 }
                 
                 // 详细的 token 分解日志
                 proxyLogger.info('Kiro', 'Token breakdown', {
-                  uncached,
-                  cacheRead,
-                  cacheWrite,
-                  inputTotal: calculatedInput,
-                  output: tokenUsage.outputTokens || 0,
-                  total: tokenUsage.totalTokens || 0,
-                  contextUsage: tokenUsage.contextUsagePercentage ? `${tokenUsage.contextUsagePercentage.toFixed(2)}%` : 'N/A'
+                  uncachedInputTokens,
+                  cacheReadInputTokens: usage.cacheReadTokens,
+                  cacheWriteInputTokens: usage.cacheWriteTokens,
+                  inputTotal: hasRealInputTokens ? usage.inputTokens : undefined,
+                  output: hasRealOutputTokens ? usage.outputTokens : undefined,
+                  total: totalTokens,
+                  contextUsage: isValidUsageToken(tokenUsage.contextUsagePercentage) ? `${tokenUsage.contextUsagePercentage.toFixed(2)}%` : 'N/A'
                 })
               }
               
               // 直接在 metadata 中的 tokens
-              if (metadata.inputTokens) {
-                usage.inputTokens = metadata.inputTokens
-                hasRealTokenUsage = true
+              if (isValidUsageToken(metadata.inputTokens)) {
+                explicitInputTokens = metadata.inputTokens
+                applyRealInputTokens()
               }
-              if (metadata.outputTokens) usage.outputTokens = metadata.outputTokens
+              if (isValidUsageToken(metadata.outputTokens)) {
+                usage.outputTokens = metadata.outputTokens
+                hasRealOutputTokens = true
+                applyRealInputTokens()
+              }
             }
             
             if (logStreamEvents) {
@@ -1915,20 +1942,29 @@ async function parseEventStream(
             // 处理 usageEvent
             if (eventType === 'usageEvent' || eventType === 'usage' || event.usageEvent || event.usage) {
               const usageData = event.usageEvent || event.usage || event
-              if (usageData.inputTokens) {
-                usage.inputTokens = usageData.inputTokens
-                hasRealTokenUsage = true
+              if (usageData && typeof usageData === 'object' && !Array.isArray(usageData)) {
+                if (isValidUsageToken(usageData.inputTokens)) {
+                  explicitInputTokens = usageData.inputTokens
+                  applyRealInputTokens()
+                }
+                if (isValidUsageToken(usageData.outputTokens)) {
+                  usage.outputTokens = usageData.outputTokens
+                  hasRealOutputTokens = true
+                  applyRealInputTokens()
+                }
               }
-              if (usageData.outputTokens) usage.outputTokens = usageData.outputTokens
             }
             
             // 处理 meteringEvent - Kiro API 返回 credit 使用量
             if (eventType === 'meteringEvent' || event.meteringEvent) {
               const metering = event.meteringEvent || event
-              if (metering.usage && typeof metering.usage === 'number') {
+              if (isValidUsageToken(metering.usage)) {
                 // 累加 credit 使用量
-                usage.credits += metering.usage
-                proxyLogger.info('Kiro', `meteringEvent - credit: ${metering.usage}, total: ${usage.credits}`)
+                const totalCredits = usage.credits + metering.usage
+                if (Number.isFinite(totalCredits)) {
+                  usage.credits = totalCredits
+                  proxyLogger.info('Kiro', `meteringEvent - credit: ${metering.usage}, total: ${usage.credits}`)
+                }
               }
             }
             
@@ -1953,7 +1989,7 @@ async function parseEventStream(
             // 处理 contextUsageEvent - 上下文使用百分比 + breakdown（Conversation/MCP tools/Steering files）
             if (eventType === 'contextUsageEvent' || event.contextUsageEvent) {
               const contextEvent = event.contextUsageEvent || event
-              if (contextEvent.contextUsagePercentage !== undefined) {
+              if (isValidUsageToken(contextEvent.contextUsagePercentage) && contextEvent.contextUsagePercentage <= 100) {
                 const percentage = contextEvent.contextUsagePercentage
                 // 捕获 breakdown 并存入 usage.contextUsage
                 usage.contextUsage = {
@@ -1965,7 +2001,7 @@ async function parseEventStream(
                   } : undefined
                 }
                 // 若已拿到真实 tokenUsage，仅记录百分比，不覆盖 inputTokens
-                if (hasRealTokenUsage) {
+                if (hasRealInputTokens) {
                   proxyLogger.info('Kiro', `contextUsageEvent - Context usage: ${percentage.toFixed(2)}% (real tokenUsage already received)`)
                 } else {
                   // 反推真实 inputTokens：modelContext × percentage / 100
@@ -2152,7 +2188,7 @@ async function parseEventStream(
     }
 
     // 如果 API 没有返回 token 信息，优先用 tiktoken 精确计算，兜底字符系数
-    if (usage.outputTokens === 0 && totalOutputChars > 0) {
+    if (!hasRealOutputTokens && totalOutputChars > 0) {
       if (collectedOutputText) {
         // tiktoken cl100k_base 精确计算（±5%）
         usage.outputTokens = Math.max(1, countTokens(collectedOutputText))

@@ -734,7 +734,7 @@ const api = {
   },
 
   // 获取可用模型列表
-  proxyGetModels: (): Promise<{ success: boolean; error?: string; models: Array<{ id: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache?: boolean }> => {
+  proxyGetModels: (): Promise<{ success: boolean; error?: string; models: Array<{ id: string; upstreamId?: string; clientId?: string; name: string; description: string; inputTypes?: string[]; maxInputTokens?: number | null; maxOutputTokens?: number | null; rateMultiplier?: number; rateUnit?: string }>; fromCache?: boolean }> => {
     return ipcRenderer.invoke('proxy-get-models')
   },
 
