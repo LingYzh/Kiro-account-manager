@@ -9,6 +9,7 @@
 - `npm run test:compat`：离线兼容性单测与 HTTP 集成测试，使用合成元数据和模拟上游，不读取账号或消费额度。
 - `npm run test:e2e`：现有在线测试，需要已启动代理与可用账号，可能消费额度。
 - Release：同步 package.json/package-lock.json 版本及两份 README 顶部更新日志后，推送匹配的 `v<version>` 标签；`.github/workflows/build.yml` 构建多平台产物并发布，Windows runner 固定为 windows-2022。
+- Windows 自动更新使用一次构建 x64/ia32/arm64 的通用 NSIS 包；禁止扁平化覆盖各架构的同名 latest.yml，否则客户端会收到错误架构安装包。
 
 ## 架构
 

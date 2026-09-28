@@ -1,0 +1,61 @@
+name: Repair v1.7.7 Windows update manifest
+
+on:
+    push:
+        branches: [master]
+        paths: ['.github/workflows/repair-v1.7.7-windows-update.yml']
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    publish-universal-installer:
+        runs-on: windows-2022
+        steps:
+            - name: Checkout immutable release source
+              uses: actions/checkout@v4
+              with:
+                  ref: v1.7.7
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: '3.11'
+
+            - name: Install setuptools
+              run: pip install setuptools
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+                  cache-dependency-path: Kiro-account-manager/package-lock.json
+
+            - name: Install dependencies
+              working-directory: Kiro-account-manager
+              run: npm ci
+
+            - name: Build release source
+              working-directory: Kiro-account-manager
+              run: npm run build
+
+            - name: Package architecture-selecting NSIS installer
+              working-directory: Kiro-account-manager
+              run: npx electron-builder --win --x64 --ia32 --arm64 -p never --config.nsis.artifactName='kiro-account-manager-${version}-setup.exe'
+
+            - name: Verify manifest and replace update assets
+              working-directory: Kiro-account-manager
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $manifest = Get-Content -LiteralPath 'dist/latest.yml' -Raw
+                  if ($manifest -notmatch 'version: 1\.7\.7' -or $manifest -notmatch 'path: kiro-account-manager-1\.7\.7-setup\.exe') {
+                      throw 'Unexpected universal installer manifest'
+                  }
+                  gh release upload v1.7.7 dist/kiro-account-manager-1.7.7-setup.exe dist/kiro-account-manager-1.7.7-setup.exe.blockmap --clobber --repo LingYzh/Kiro-account-manager
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  gh release upload v1.7.7 dist/latest.yml --clobber --repo LingYzh/Kiro-account-manager
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
