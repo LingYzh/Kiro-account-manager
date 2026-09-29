@@ -2,7 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
+const desktopApi: import('../shared/desktopConfig').DesktopConfigApi = {
+    proxyDesktopState: () => ipcRenderer.invoke('proxy-desktop-state'),
+    proxyDesktopPreview: input => ipcRenderer.invoke('proxy-desktop-preview', input),
+    proxyDesktopApply: token => ipcRenderer.invoke('proxy-desktop-apply', token),
+    proxyDesktopRestore: id => ipcRenderer.invoke('proxy-desktop-restore', id)
+}
 const api = {
+    ...desktopApi,
   // 打开外部链接
   openExternal: (url: string, usePrivateMode?: boolean): void => {
     ipcRenderer.send('open-external', url, usePrivateMode)

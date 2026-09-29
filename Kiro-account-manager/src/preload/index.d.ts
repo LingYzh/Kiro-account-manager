@@ -1,3 +1,4 @@
+import type { DesktopConfigApi as importDesktopConfigApi } from '../shared/desktopConfig'
 import { ElectronAPI } from '@electron-toolkit/preload'
 
 interface AccountData {
@@ -135,7 +136,7 @@ interface StatusResult {
   error?: { message: string }
 }
 
-interface KiroApi {
+interface KiroApi extends importDesktopConfigApi {
   openExternal: (url: string, usePrivateMode?: boolean) => void
   getAppVersion: () => Promise<string>
   onAuthCallback: (callback: (data: { code: string; state: string }) => void) => () => void

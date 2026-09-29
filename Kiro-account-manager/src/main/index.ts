@@ -30,6 +30,7 @@ import { openaiToKiro } from './proxy/translator'
 import { getSystemProxy, safeCreateProxyAgent } from './proxy/systemProxy'
 import { proxyLogStore, interceptConsole } from './proxy/logger'
 import { registerIPCHandlers as registerRegistrationHandlers } from './registration/ipc-handlers'
+import { getDesktopConfigService, registerDesktopConfigHandlers } from './ipc/desktopConfig'
 import { registerProxyPoolIpcHandlers } from './ipc/proxyPool'
 import {
   createTray,
@@ -359,6 +360,7 @@ function initProxyServer(): ProxyServer {
   proxyServer = new ProxyServer(
     config,
     {
+      getDesktopRoutes: () => getDesktopConfigService().readRoutes(),
       onRequest: (info) => {
         mainWindow?.webContents.send('proxy-request', info)
       },
@@ -2794,6 +2796,11 @@ app.whenReady().then(async () => {
    */
   // 代理池相关 IPC handler 已拆分到独立模块，便于后续维护
   registerProxyPoolIpcHandlers()
+    registerDesktopConfigHandlers(() => {
+        const config = initProxyServer().getConfig()
+        return { host: config.host, port: config.port, tlsEnabled: config.tls?.enabled,
+            apiKey: (config.apiKey || config.apiKeys?.find(key => key.enabled)?.key || '').trim() }
+    }, () => proxyServer?.isRunning() || false)
 
   // ============ 账号-代理绑定（反代时 N 账号一个 IP）============
   /**

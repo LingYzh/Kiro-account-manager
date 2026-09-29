@@ -273,6 +273,12 @@ npx electron-builder --linux --arm64
 
 ## 📋 更新日志
 
+### v1.7.9 (2026-9-29) — Claude Desktop 一键网关配置
+
+- 支持全新 Claude Desktop 首次启动前配置为 3P Gateway，提供写入预览、备份与恢复。
+- 默认 Opus/Sonnet/Haiku 三档，支持其他模型映射和额外条目；Claude 模型使用对应版本的客户端兼容 ID。
+- Desktop 菜单仅显示实际模型名称（如 `Claude Opus 5`），不再拼接 Kiro 模型 ID；已有配置请重新应用以更新菜单。
+
 ### v1.7.8 (2026-9-29) — Claude Code 网关模型名称与缓存诊断
 
 - **优化**：向 Claude Code 展示 `claude-opus-5-5` 等可识别的模型 ID，实际请求仍按账号目录解析至 Kiro 上游 ID。“查看模型”可同时查看、复制两种 ID；默认开启的持久化开关控制模型发现及一键配置。

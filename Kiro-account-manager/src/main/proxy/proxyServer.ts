@@ -1,3 +1,4 @@
+import { DESKTOP_GATEWAY_PREFIX, desktopModelName, desktopClientModelId, resolveDesktopModel, type DesktopConfigInput } from '../../shared/desktopConfig'
 // Kiro Proxy HTTP/HTTPS 服务器
 import http from 'http'
 import https from 'https'
@@ -44,6 +45,7 @@ import { loadSteeringDocuments, formatSteeringForPrompt, type SteeringDocument }
 
 
 export interface ProxyServerEvents {
+    getDesktopRoutes?: () => Promise<DesktopConfigInput | undefined>
   onRequest?: (info: { path: string; method: string; accountId?: string }) => void
   onResponse?: (info: { path: string; model?: string; status: number; tokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number; credits?: number; responseTime?: number; error?: string }) => void
   onError?: (error: Error) => void
@@ -241,6 +243,8 @@ class BodyTooLargeError extends Error {
 }
 
 export class ProxyServer {
+    private desktopRoutes = new WeakMap<http.IncomingMessage, DesktopConfigInput>()
+    private desktopResponseModels = new WeakMap<http.ServerResponse, string>()
   private server: http.Server | https.Server | null = null
   private fallbackServer: http.Server | null = null  // HTTPS 启用时同时监听 HTTP（可选）
   private accountPool: AccountPool
@@ -1901,6 +1905,28 @@ export class ProxyServer {
 
       // 路由（移除查询参数）
       const pathWithoutQuery = path.split('?')[0]
+      if (pathWithoutQuery.startsWith(`${DESKTOP_GATEWAY_PREFIX}/`)) {
+          const endpoint = pathWithoutQuery.slice(DESKTOP_GATEWAY_PREFIX.length)
+          const routes = await this.events.getDesktopRoutes?.()
+          if (!routes) {
+              this.sendError(res, 503, 'Desktop model routes are not configured', 'anthropic')
+              return
+          }
+          this.desktopRoutes.set(req, routes)
+          if ((endpoint === '/v1/models' || endpoint === '/models') && method === 'GET') {
+              const data = routes.routes.map(route => ({ id: desktopClientModelId(route), type: 'model', display_name: desktopModelName(route.modelId), created_at: '2026-01-01T00:00:00Z' }))
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ data, has_more: false, first_id: data[0]?.id, last_id: data.at(-1)?.id }))
+          } else if ((endpoint === '/v1/messages' || endpoint === '/messages') && method === 'POST') {
+              await this.handleClaudeMessages(req, res, controller.signal)
+          } else if ((endpoint === '/v1/messages/count_tokens' || endpoint === '/messages/count_tokens') && method === 'POST') {
+              await this.handleCountTokens(req, res, controller.signal)
+          } else {
+              this.sendError(res, 404, 'Unknown Desktop gateway endpoint', 'anthropic')
+          }
+          return
+      }
+
       
       if (pathWithoutQuery === '/v1/models' || pathWithoutQuery === '/models') {
         await this.handleModels(res, controller.signal)
@@ -2133,7 +2159,8 @@ export class ProxyServer {
 
   private isAnthropicPath(path: string): boolean {
     const pathWithoutQuery = path.split('?')[0]
-    return pathWithoutQuery === '/v1/messages'
+    return pathWithoutQuery.startsWith(`${DESKTOP_GATEWAY_PREFIX}/`)
+      || pathWithoutQuery === '/v1/messages'
       || pathWithoutQuery === '/messages'
       || pathWithoutQuery === '/anthropic/v1/messages'
       || pathWithoutQuery === '/v1/messages/count_tokens'
@@ -2197,6 +2224,8 @@ export class ProxyServer {
       const body = await this.readBody(req, signal)
       this.throwIfAborted(signal)
       const request = JSON.parse(body) as Partial<ClaudeRequest>
+      const routes = this.desktopRoutes.get(req)
+      if (routes) request.model = resolveDesktopModel(routes, request.model || '')
       if (!Array.isArray(request.messages)) {
         throw new Error('count_tokens requires messages')
       }
@@ -2973,7 +3002,18 @@ export class ProxyServer {
     })
 
     // 应用模型映射
-    request.model = this.applyModelMapping(request.model, matchedApiKey?.id, request, true)
+    const desktopRoutes = this.desktopRoutes.get(req)
+    if (desktopRoutes) {
+        try {
+            request.model = resolveDesktopModel(desktopRoutes, incomingRequest.model)
+            this.desktopResponseModels.set(res, incomingRequest.model)
+        } catch (error) {
+            this.sendError(res, 400, (error as Error).message, 'anthropic')
+            return
+        }
+    } else {
+        request.model = this.applyModelMapping(request.model, matchedApiKey?.id, request, true)
+    }
 
     const startTime = Date.now()
 
@@ -3065,7 +3105,7 @@ export class ProxyServer {
           () => true,
           matchedApiKey?.id
         )
-        const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, request.model, toolNameRegistry, result.reasoningContent)
+        const response = kiroToClaudeResponse(result.content, result.toolUses, result.usage, this.desktopResponseModels.get(res) || request.model, toolNameRegistry, result.reasoningContent)
         if (this.config.logRequests) {
             this.logRequestMilestone(res, 'Claude response completed', {
                 model: request.model,
@@ -3121,6 +3161,7 @@ export class ProxyServer {
     toolNameRegistry: ToolNameRegistry = new ToolNameRegistry(),
     signal?: AbortSignal
   ): Promise<void> {
+    const responseModel = this.desktopResponseModels.get(res) || model
     const id = msgId || `msg_${uuidv4()}`
     let currentBlockIndex = contentBlockIndex
     let hasStartedTextBlock = false
@@ -3162,7 +3203,7 @@ export class ProxyServer {
                     type: 'message',
                     role: 'assistant',
                     content: [],
-                    model,
+                    model: responseModel,
                     stop_reason: null,
                     stop_sequence: null,
                     usage: { input_tokens: estimatedInputTokens, output_tokens: 0 }

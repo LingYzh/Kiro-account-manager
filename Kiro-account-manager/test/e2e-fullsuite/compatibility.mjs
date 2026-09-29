@@ -289,6 +289,40 @@ try {
         }
         assert.equal(metadataRequests.length, 1, 'cold request loads and reuses metadata without /v1/models')
     })
+    await check('Desktop uses current Claude identity and isolates non-Claude tier routes', async () => {
+        const routes = { routes: [
+            { id: 'claude-opus-4-6', family: 'opus', label: 'Opus', modelId: 'claude-opus-4.8' },
+            { id: 'claude-sonnet-4-6', family: 'sonnet', label: 'GPT', modelId: 'gpt-5.6-sol' }
+        ], defaultRouteId: 'claude-opus-4-6' }
+        proxy.events.getDesktopRoutes = async () => routes
+        try {
+            proxy.updateConfig({ apiKey: 'fixture-desktop-secret' })
+            assert.equal((await rawFetch(`${base}/claude-desktop/v1/models`)).status, 401)
+            assert.equal((await rawFetch(`${base}/claude-desktop/v1/models`, { headers: { Authorization: 'Bearer fixture-desktop-secret' } })).status, 200)
+            proxy.updateConfig({ apiKey: '' })
+            const listing = await (await rawFetch(`${base}/claude-desktop/v1/models`)).json()
+            assert.deepEqual(listing.data.map(model => model.id), ['claude-opus-4-8', 'claude-sonnet-4-6'])
+            for (const [model, target] of [['claude-opus-4-8', 'claude-opus-4.8'], ['claude-sonnet-4-6', 'gpt-5.6-sol']]) {
+                for (const stream of [false, true]) {
+                    const result = await post('/claude-desktop/v1/messages', { model, stream, max_tokens: 100, messages: [{ role: 'user', content: 'hello' }] })
+                    assert.equal(result.status, 200, result.text)
+                    assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, target)
+                    if (stream) assert.ok(result.text.includes(`"model":"${model}"`))
+                    else assert.equal(JSON.parse(result.text).model, model)
+                }
+            }
+            const bad = await post('/claude-desktop/v1/messages', { model: 'claude-opus-4-6', max_tokens: 100, messages: [] })
+            assert.equal(bad.status, 400)
+            const count = await post('/claude-desktop/v1/messages/count_tokens', { model: 'claude-opus-4-8', messages: [{ role: 'user', content: 'hello' }] })
+            assert.equal(count.status, 200)
+            const normal = await post('/v1/messages', { model: 'claude-sonnet-4-6', max_tokens: 100, messages: [{ role: 'user', content: 'hello' }] })
+            assert.equal(normal.status, 200)
+            assert.equal(requests.at(-1).payload.conversationState.currentMessage.userInputMessage.modelId, 'claude-sonnet-4.6')
+        } finally {
+            proxy.updateConfig({ apiKey: '' })
+            delete proxy.events.getDesktopRoutes
+        }
+    })
     await check('Claude legacy aliases strip unsupported thinking and effort', async () => {
         for (const [alias, id] of [['claude-sonnet-4.0', 'claude-sonnet-4'], ['claude-sonnet-4-5-20250929', 'claude-sonnet-4.5'], ['claude-opus-4-5', 'claude-opus-4.5'], ['claude-haiku-4-5', 'claude-haiku-4.5']]) {
             const result = await post('/v1/messages', { model: alias, max_tokens: 100, messages: [{ role: 'user', content: 'hello' }], thinking: { type: 'enabled', budget_tokens: 16000 }, output_config: { effort: 'high' } })

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Bot, Check, Code2, Cpu, FileCog, Loader2, Settings2, Terminal, X, Sparkles, Workflow, type LucideIcon } from 'lucide-react'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Select } from '../ui'
 import { useAccountsStore } from '../../store/accounts'
+import { ClaudeDesktopConfig } from './ClaudeDesktopConfig'
 import { cn } from '@/lib/utils'
 
 type ClientTarget = 'claudeCode' | 'opencode' | 'codex' | 'gemini' | 'hermes' | 'openclaw'
@@ -48,9 +49,11 @@ const clientLabels: Record<ClientTarget, string> = {
 export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDialogProps) {
   const accounts = useAccountsStore(state => state.accounts)
   const activeAccountId = useAccountsStore(state => state.activeAccountId)
+    const [desktopTab, setDesktopTab] = useState(true)
+    const [desktopBusy, setDesktopBusy] = useState(false)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [selectedModelId, setSelectedModelId] = useState('')
-  const [selectedClients, setSelectedClients] = useState<ClientTarget[]>(['claudeCode', 'opencode', 'codex', 'gemini', 'hermes', 'openclaw'])
+  const [selectedClients, setSelectedClients] = useState<ClientTarget[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -198,8 +201,8 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={() => onOpenChange(false)} />
-      <Card className="relative w-[780px] max-h-[85vh] shadow-2xl border-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200 glass-card-strong">
+      <div className="absolute inset-0 bg-black/50" onClick={() => !(desktopBusy || applying) && onOpenChange(false)} />
+      <Card className="relative w-[780px] max-w-[calc(100vw-2rem)] max-h-[85vh] shadow-2xl border-0 overflow-hidden animate-in fade-in zoom-in-95 duration-200 glass-card-strong">
         <CardHeader className="pb-4 border-b sticky top-0 z-10">
           <div className="flex items-center justify-between">
             <CardTitle className="text-xl flex items-center gap-3">
@@ -220,13 +223,19 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
                 </div>
               </div>
             </CardTitle>
-            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => onOpenChange(false)}>
+            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg hover:bg-red-500 hover:text-white transition-colors" onClick={() => !(desktopBusy || applying) && onOpenChange(false)}>
               <X className="h-5 w-5" />
             </Button>
           </div>
         </CardHeader>
         <CardContent className="p-4">
-          <div className="max-h-[calc(85vh-140px)] overflow-y-auto pr-2 space-y-4">
+            <div className="flex gap-2 mb-4">
+                <Button variant={desktopTab ? 'default' : 'outline'} disabled={desktopBusy || applying} onClick={() => setDesktopTab(true)}>Claude Desktop</Button>
+                <Button variant={!desktopTab ? 'default' : 'outline'} disabled={desktopBusy || applying} onClick={() => setDesktopTab(false)}>{isEn ? 'Other clients' : '其他客户端'}</Button>
+            </div>
+          <div className="max-h-[calc(85vh-190px)] overflow-y-auto pr-2 space-y-4">
+            {desktopTab ? <ClaudeDesktopConfig models={models} loading={loadingModels} isEn={isEn} busy={desktopBusy} onBusyChange={setDesktopBusy} onReload={loadModels} /> : <>
+            <p className="text-sm text-muted-foreground">{isEn ? 'The selected model becomes the client default model.' : '此处选择的模型会写入客户端配置，作为客户端默认模型。'}</p>
             <div className="rounded-xl border bg-background p-4 space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
@@ -337,12 +346,13 @@ export function ClientConfigDialog({ open, onOpenChange, isEn }: ClientConfigDia
             )}
 
             <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={applying}>{isEn ? 'Close' : '关闭'}</Button>
+              <Button variant="outline" onClick={() => !(desktopBusy || applying) && onOpenChange(false)} disabled={applying}>{isEn ? 'Close' : '关闭'}</Button>
               <Button onClick={applyConfig} disabled={loadingModels || applying || !selectedModelId || selectedClients.length === 0}>
                 {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                 {applying ? (isEn ? 'Configuring...' : '配置中...') : (isEn ? 'Apply Configuration' : '应用配置')}
               </Button>
             </div>
+            </>}
           </div>
         </CardContent>
       </Card>

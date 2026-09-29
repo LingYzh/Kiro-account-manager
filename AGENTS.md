@@ -32,3 +32,5 @@
 - Claude 流在首段内容或有效空完成前保留真实 HTTP 错误状态；明确的上游上下文超限与 UTF-8 字节超限分别返回 400/413，不能伪造 token 数值或继续重放。详见 `.Codex/memory/context-preservation.md`。
 - Claude Code 请求按请求保留历史；会话身份隔离完整 API key、session、agent 与辅助请求类别。不能在模型上下文前注入每轮变化的时间戳，也不能把内部 cache checkpoint 后移到动态后缀。
 - Claude 缓存 usage 仅来自上游遥测，不能用本地模拟命中回填；未知与真实零需区分，JSON/SSE 的 input_tokens 均扣除真实缓存部分。已知不可执行的语义字段在上游请求前明确报错，详见 `.Codex/memory/gateway-cache-fidelity.md`。
+
+- Claude Desktop 一键配置位于 `src/main/clientConfig/`；Claude 客户端 ID 统一复用 `src/shared/modelIdentity.ts`，保留真实版本，非 Claude 目标使用显式档位别名。配置测试必须使用临时目录，详见 `.Codex/memory/claude-desktop-config.md`。

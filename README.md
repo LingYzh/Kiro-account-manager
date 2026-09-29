@@ -273,6 +273,12 @@ The project is configured with GitHub Actions workflow for auto building all pla
 
 ## 📋 Changelog
 
+### v1.7.9 (2026-9-29) — Claude Desktop Gateway Setup
+
+- Configure a fresh Claude Desktop installation for first-launch 3P Gateway mode, with preview, backups and restoration.
+- Configure Opus/Sonnet/Haiku targets and additional entries, including non-Claude models. Claude targets use their matching client-compatible model IDs.
+- Desktop menus display only the actual model name, such as `Claude Opus 5`, without appended Kiro IDs. Reapply the Desktop configuration to update existing menus.
+
 ### v1.7.8 (2026-9-29) — Claude Code Gateway Identity and Cache Diagnostics
 
 - **Improved**: Expose Claude Code compatible model IDs such as `claude-opus-5-5` while resolving requests to the account's Kiro model ID. View Models shows and copies both IDs; a saved, default-on switch controls discovery and one-click client configuration.
