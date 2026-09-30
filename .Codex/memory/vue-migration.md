@@ -18,6 +18,18 @@
 - 迁移前先用 `test/renderer-*.mjs` 特征测试锁定 React 版行为，Pinia 版必须同样通过。
 - `test/renderer-accounts-store.mjs`（Task 6）已用特征测试锁定 accounts store 持久化、保存时序、筛选排序统计、导入导出、代理池行为，作为 Pinia 版验收基线；`autoRefreshSyncInfo` 是"读入内存但从不写回磁盘"的疑似 bug（`loadFromStorage` 会读，`flushSaveImmediately` 落盘对象里没有这个 key）——与 `currentMachineId` 系三个字段不同：那三个字段 `loadFromStorage` 根本不读取 `data` 里的值（完全不参与持久化往返，不读不写），不是"读了不写"。
 
+## Phase 2 待决策清单（Pinia 迁移前必须由用户确认，禁止实现者顺手修改）
+
+特征测试已把以下 React 版既有行为锁定为基线。Pinia 版默认照搬；如要修复，需两版同时修改并同步更新测试，否则会破坏两版来回切换的兼容性或行为等价。
+
+- `autoRefreshSyncInfo`：会读入，但从不写回（`flushSaveImmediately` 落盘对象里没有这个 key）。如果照直觉补上写回，Vue 版写出的文档会比 React 版多一个字段。
+- `currentMachineId`、`originalMachineId`、`originalBackupTime`：`AccountData` 类型里声明了，实际不读不写，是纯内存态。照类型声明去实现持久化，就会引入跨会话保存机器码的新行为，风险最高。
+- `importAccounts`：没有去重，同一邮箱重复导入会生成重复账号。去重只存在于 `importFromExportData` 的 `isAccountExists` 路径。
+- 纯函数层：
+    - `formatDateSafe` 对非法字符串原样返回，`null` 返回 `1970-01-01`，`undefined` 返回 `''`。
+    - `rateLimiter` 一旦触发退避，一次成功不会解除。
+    - `updateConfig({ burst })` 要等 `reset()` 才生效。
+
 ## 测试踩坑
 
 - 给 esbuild 打包后的 zustand store 做特征测试时，用 `node:test` 的 `mock.timers.enable({ apis: ['setTimeout','setInterval','Date'] })` 可以直接拦截打包产物内部调用的全局定时器，无需修改源码或额外注入。
