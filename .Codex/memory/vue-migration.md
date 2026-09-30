@@ -56,13 +56,20 @@
 
 - 本机 `~/.npmrc` 的默认源是 `registry.npmmirror.com`。用它 `npm install @lingyzh/ui` 时，lockfile 的 resolved 会写成镜像地址，而刚发布的版本镜像还没同步，可能根本装不到。
 - 做法：升级后把 lockfile 中 `node_modules/@lingyzh/ui` 的 resolved 改回 `https://registry.npmjs.org/@lingyzh/ui/-/ui-<版本>.tgz`，并确认 integrity 与 `npm view @lingyzh/ui@<版本> dist.integrity --registry https://registry.npmjs.org/` 一致。
-- 当前版本 0.2.0（2026-09-30），包含 locale、Badge/Alert/Spinner/Menu/confirmDialog、Button danger、Dialog size 与 placement=end、Input 数字模式。
+- 当前版本 0.2.1（2026-09-30），包含 A 批 locale、Badge/Alert/Spinner/Menu/confirmDialog、Button danger、Dialog size 与 placement=end、Input 数字模式，以及 B 批 Checkbox/Radio/Progress/CopyButton/ColorSwatches。
 
 ## Phase 1 B 批接续检查点（2026-09-30）
 
 - 接续 Claude Desktop 会话“安装 @lingyzh/ui 依赖”（`3b754c04-578a-400a-b27e-a88972a2c295`）。最后一轮测试在 17:03 完成，17:04 的月度额度 402 发生在工具结果返回之后，不能把本轮测试记为未完成。
 - UI 仓库 main 已提交 B 批五个组件（UiCheckbox、UiRadio、UiProgress、UiCopyButton、UiColorSwatches）及文档、demo、测试与评审修复；发布准备提交为 `449183b`，源码与 lockfile 版本均为 0.2.1。
 - 已复核原会话结果及落盘报告：类型检查、单元测试 23/23、文档与库构建、TS 5.9.3 兼容检查通过；最终完整 UI 回归 20/20（44 个文档路由，`UI/artifacts/ui-r0qXEX/report.json`）、A 批专项 7/7（`feedback-BrclXY/report.json`）、B 批专项 6/6（`controls-JpdjPc/report.json`）通过。Codex root 另直接复核了 Checkbox 禁用与半选、Radio、Progress、CopyButton 浅深成功态和色板外已保存颜色的截图。
-- 发布前打包预览包含五个新组件与 controls.css，共 154 个文件；没有带入测试或 artifacts。npm 官方 registry 的 latest 仍为 0.2.0（本次实时查询）。UI 本地尚无 v0.2.1 标签；远端标签查询因连接重置未能确认，发布时需重新检查。
-- 尚待完成：按用户原会话“每次发布前单独确认”的约定取得 0.2.1 发布许可，再发布 npm、创建并推送对应标签与 UI main；需要 OTP 或网页授权时交由用户完成。发布后 KAM 才升级到 0.2.1，核对官方 tarball URL 与 integrity，执行 typecheck:vue、build、test:compat 并提交。
-- KAM 仍在 feat/vue-migration，实际依赖、lockfile 与安装目录均为 @lingyzh/ui 0.2.0。Phase 2 尚未开工，开工前仍须细化计划并确认上面的待决策清单。
+- 发布前打包预览包含五个新组件与 controls.css，共 154 个文件；没有带入测试或 artifacts。接续初检时 npm 官方 registry 的 latest 为 0.2.0，UI 本地尚无 v0.2.1 标签；首次远端标签查询因连接重置未能确认。
+- 2026-09-30 用户已明确确认发布，npm 网页授权由用户完成；发布与 KAM 升级结果见下节。
+- 接续初检时 KAM 在 feat/vue-migration，实际依赖、lockfile 与安装目录均为 @lingyzh/ui 0.2.0。Phase 2 尚未开工，开工前仍须细化计划并确认上面的待决策清单。
+
+## Phase 1 完成：0.2.1 发布与 KAM 升级（2026-09-30）
+
+- 官方 npm 已发布 @lingyzh/ui 0.2.1，latest 指向 0.2.1；UI main 与注释标签 v0.2.1 已原子推送，标签解引用为发布准备提交 `449183b2f8095d7b2f4b9a097ca9c6213fbd84c5`。UI 发布记录位于其 `.Codex/memory/publishing.md` 与 HANDOFF.md。
+- KAM package.json 精确依赖、lockfile 和实际安装目录均已升级为 0.2.1；安装目录是普通目录，非本地链接。lockfile tarball 为 `https://registry.npmjs.org/@lingyzh/ui/-/ui-0.2.1.tgz`，integrity 与官方 registry 一致（`sha512-c7oSquzKLuYbfb/fI0yT2Z98N1zGxZCQ4Rov+h/u74RA/hR2dusIxPosYONVmnwWiDYZhdMnkYJ2El3dM9fEEw==`）。
+- 升级后已通过 npm run typecheck:vue、npm run build（含主进程与 React 类型检查）、npm run build:vue、npm run test:compat；后者包含 43 项模拟 HTTP 检查、共享模块与 accounts store 特征测试。未运行消费真实账号额度的在线测试。
+- Phase 1 的 UI 库补缺与两批发布完成。KAM 升级仅本地提交到 feat/vue-migration；Phase 2 仍须细化计划并确认既有行为待决策清单后再开始。

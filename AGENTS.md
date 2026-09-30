@@ -21,7 +21,7 @@
 - `src/renderer-shared/`：React 与 Vue 两版共享的框架无关模块（`types/`、`i18n/locales/`、`lib/` 纯函数），别名 `@shared/*`；禁止依赖 react/zustand/tailwind，也禁止引用 `src/renderer/`。
 - `src/renderer-vue/`：Vue 3 + Pinia + `@lingyzh/ui` 渲染层，electron-vite `--mode vue` 切换入口，与 React 版并行开发、尚未替换。
 - `test/e2e-fullsuite/`：代理 HTTP 回归测试。
-- `@lingyzh/ui@0.1.0` 以 `.ts/.vue` 源码发布，UI 库缺失的通用组件必须先在 UI 仓库补齐发布再引用，KAM 内不自建通用组件。持久化兼容边界与子代理配置详见 `.Codex/memory/vue-migration.md`。
+- `@lingyzh/ui@0.2.1` 以 `.ts/.vue` 源码发布，UI 库缺失的通用组件必须先在 UI 仓库补齐发布再引用，KAM 内不自建通用组件。持久化兼容边界与子代理配置详见 `.Codex/memory/vue-migration.md`。
 
 ## 非常规约定
 
