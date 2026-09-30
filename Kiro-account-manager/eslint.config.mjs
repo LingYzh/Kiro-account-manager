@@ -7,6 +7,14 @@ import eslintPluginReactRefresh from 'eslint-plugin-react-refresh'
 import eslintPluginVue from 'eslint-plugin-vue'
 import vueEslintParser from 'vue-eslint-parser'
 
+// 按字段名（不按数组下标）合并官方 flat/recommended 里每一档的 rules，避免插件升级后
+// 数组项数/顺序变化时静默丢规则；parser、processor 等按项区分的设置不从这里提取，
+// 而是在下方配置块里显式声明。
+const vueRecommendedRules = eslintPluginVue.configs['flat/recommended'].reduce(
+  (merged, config) => ({ ...merged, ...(config.rules ?? {}) }),
+  {}
+)
+
 export default defineConfig(
   { ignores: ['**/node_modules', '**/dist', '**/out'] },
   tseslint.configs.recommended,
@@ -57,10 +65,11 @@ export default defineConfig(
     // "clear" 占位报告直接冒出成真实 error，必须显式挂上官方 processor 才能被吞掉。
     processor: 'vue/vue',
     rules: {
-      ...eslintPluginVue.configs['flat/recommended'][1].rules,
-      ...eslintPluginVue.configs['flat/recommended'][2].rules,
-      ...eslintPluginVue.configs['flat/recommended'][3].rules,
-      ...eslintPluginVue.configs['flat/recommended'][4].rules,
+      // 合并 eslint-plugin-vue@10.11.1 官方 flat/recommended 数组里的全部规则档位
+      // （base 无 rules 字段 / essential / strongly-recommended / recommended），
+      // 按 rules 字段名合并而不是按数组下标取，插件升级后数组项数或顺序变化也不会
+      // 静默丢规则或漏合并。parser/processor 由本配置块显式声明，不从该数组提取。
+      ...vueRecommendedRules,
       'vue/html-indent': ['error', 4]
     }
   },
