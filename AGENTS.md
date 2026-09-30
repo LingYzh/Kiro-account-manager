@@ -8,7 +8,7 @@
 - `npm run typecheck:vue`：Vue 渲染层（`src/renderer-vue/`）与共享目录（`src/renderer-shared/`）的类型检查，`vue-tsc -p tsconfig.vue.json`。
 - `npm run build`：检查并构建 Electron 应用（React 渲染层）。
 - `npm run dev:vue` / `npm run build:vue`：electron-vite `--mode vue`，改用 Vue 渲染层入口启动/构建；该模式下入口、别名等由 `electron.vite.config.ts` 按 `mode` 分支配置。
-- `npm run test:compat`：离线兼容性单测与 HTTP 集成测试，使用合成元数据和模拟上游，不读取账号或消费额度；已包含渲染层共享模块与 accounts store 的特征测试。
+- `npm run test:compat`：离线兼容性单测与 HTTP 集成测试，使用合成元数据和模拟上游，不读取账号或消费额度；包含共享模块、React/Pinia 共用 accounts 特征测试与 Vue 生命周期等 8 组离线场景。
 - `npm run test:e2e`：现有在线测试，需要已启动代理与可用账号，可能消费额度。
 - Release：同步 package.json/package-lock.json 版本及两份 README 顶部更新日志后，推送匹配的 `v<version>` 标签；`.github/workflows/build.yml` 构建多平台产物并发布，Windows runner 固定为 windows-2022。
 - Windows 自动更新使用一次构建 x64/ia32/arm64 的通用 NSIS 包；禁止扁平化覆盖各架构的同名 latest.yml，否则客户端会收到错误架构安装包。
@@ -20,6 +20,7 @@
 - `src/renderer/`：React 界面（迁移完成前的现行渠道）；`src/preload/`：主进程与界面的桥接。
 - `src/renderer-shared/`：React 与 Vue 两版共享的框架无关模块（`types/`、`i18n/locales/`、`lib/` 纯函数），别名 `@shared/*`；禁止依赖 react/zustand/tailwind，也禁止引用 `src/renderer/`。
 - `src/renderer-vue/`：Vue 3 + Pinia + `@lingyzh/ui` 渲染层，electron-vite `--mode vue` 切换入口，与 React 版并行开发、尚未替换。
+- Vue `src/stores/`：accounts/settings/autoSwitch/proxyPool/machineId/tasks/webhooks 七个业务 setup store；persistence 汇总原 AccountData，app 负责初始化与释放。跨 store 调用绑定当前 Pinia 实例，避免异步动作串入另一实例。
 - `test/e2e-fullsuite/`：代理 HTTP 回归测试。
 - `@lingyzh/ui@0.2.1` 以 `.ts/.vue` 源码发布，UI 库缺失的通用组件必须先在 UI 仓库补齐发布再引用，KAM 内不自建通用组件。持久化兼容边界与子代理配置详见 `.Codex/memory/vue-migration.md`。
 
@@ -30,6 +31,10 @@
 - 未知模型保留候选 ID 交给上游校验，不能静默切换模型。
 - 映射的默认推理等级只补客户端缺省值；客户端显式 thinking/effort 优先，最终仍以目标模型 schema 为准。仅签名事件不能创建空 thinking 块。
 - 新增与修改代码使用四空格缩进，避免对未改动代码批量格式化。
+- Vue 数据跨 Electron IPC 前使用 `lib/ipcData.ts` 的 `toIpcData()` 移除嵌套响应式 Proxy，保留文档字段与 undefined；不要直接把 Pinia 对象传给 preload。
+- Vue 专属主题键为 `kiro-vue-theme-mode`（light/dark/system），AccountData 的旧 theme 原样透传，darkMode 仍存实际布尔值；业务设置页复用 app.setThemeMode。Phase 2 既有行为全部保留，验收步骤见 `docs/vue-phase2-validation.md`。
+- 用户要求接下来不使用 superpowers 插件技能组；原方案文档所在目录仅保留历史文件，不代表启用该插件。
+- 最新跨设备交接见根目录 `HANDOFF.md`：Phase 2 静态/离线检查通过，但用户实际运行出现白屏，根因未定位；先修复并完成运行验收，再开始 Phase 3/4。
 - 项目记录位于 `.Codex/memory/`。不要把凭证、真实请求正文或抓包写入记录。
 - 排查工具后中断时区分适配器完成、HTTP finish 和客户端 tool_result 回传；转换后历史不能代替原始入站证据。使用请求级里程碑日志关联，避免通过重复执行工具试探问题。
 - EventStream 必须校验两级 CRC 与帧/header 边界；损坏流和工具参数不能伪装为成功。Runtime 与 Generate 的结束契约需分开验证，详见 `.Codex/memory/kiro-protocol-audit.md`。

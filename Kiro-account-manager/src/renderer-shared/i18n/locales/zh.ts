@@ -3,6 +3,47 @@
  */
 
 const zh = {
+    // Vue 外壳文案，React 既有 key 与内容保持不变。
+    shell: {
+        title: "Kiro 账号管理器",
+        accountManager: "账户管理器",
+        navigation: "页面导航",
+        tasks: "任务中心",
+        minimize: "最小化",
+        maximize: "最大化",
+        restore: "还原",
+        theme: "主题",
+        language: "语言",
+        light: "浅色",
+        dark: "深色",
+        system: "跟随系统",
+        language_auto: "跟随系统",
+        language_zh: "简体中文",
+        language_en: "English",
+        expandSidebar: "展开侧栏",
+        collapseSidebar: "折叠侧栏",
+        pendingTitle: "此页面将在 Phase 3 迁移",
+        pendingDescription: "应用外壳和数据层已接入，业务页面将在下一阶段逐项补齐。",
+        closeWindow: "关闭窗口",
+        closeQuestion: "您想要最小化到系统托盘还是退出程序？",
+        trayExplanation: "最小化到托盘后，程序将在后台继续运行，代理服务保持可用。点击托盘图标可重新打开窗口。",
+        minimizeToTray: "最小化到托盘",
+        quit: "退出程序",
+        rememberChoice: "记住我的选择",
+        noTasks: "暂无任务",
+        task_running: "进行中",
+        task_paused: "已暂停",
+        task_success: "已完成",
+        task_failed: "失败",
+        task_cancelled: "已取消",
+        taskCounts: "成功 {success}，失败 {failed}",
+        pause: "暂停",
+        resume: "恢复",
+        remove: "移除",
+        cancelAll: "全部取消",
+        clearFinished: "清理已完成",
+    },
+
   // 通用
   common: {
     confirm: '确认',

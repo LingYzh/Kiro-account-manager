@@ -70,7 +70,9 @@ export default defineConfig(
       // 按 rules 字段名合并而不是按数组下标取，插件升级后数组项数或顺序变化也不会
       // 静默丢规则或漏合并。parser/processor 由本配置块显式声明，不从该数组提取。
       ...vueRecommendedRules,
-      'vue/html-indent': ['error', 4]
+      'vue/html-indent': ['error', 4],
+      // 业务 SFC 使用 JavaScript，TS 基础模块仍保留原返回类型规则。
+      '@typescript-eslint/explicit-function-return-type': 'off'
     }
   },
   eslintConfigPrettier

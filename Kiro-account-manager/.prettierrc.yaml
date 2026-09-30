@@ -9,3 +9,6 @@ overrides:
   - files: 'src/renderer-shared/**'
     options:
       tabWidth: 4
+  - files: ['test/renderer-*.mjs', 'test/fixtures/vue-*.ts']
+    options:
+      tabWidth: 4

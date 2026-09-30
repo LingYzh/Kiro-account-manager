@@ -1,7 +1,7 @@
 import { runAccountsStoreScenarios } from './renderer-accounts-scenarios.mjs'
 
 await runAccountsStoreScenarios(
-    'src/renderer/src/store/accounts.ts',
-    'src/renderer/src',
-    'renderer-accounts-store'
+    'test/fixtures/vue-accounts-adapter.ts',
+    'src/renderer-vue/src',
+    'renderer-vue-accounts-store'
 )

@@ -3,6 +3,47 @@
  */
 
 const en = {
+    // Vue 外壳文案，React 既有 key 与内容保持不变。
+    shell: {
+        title: "Kiro Account Manager",
+        accountManager: "Account Manager",
+        navigation: "Navigation",
+        tasks: "Task Center",
+        minimize: "Minimize",
+        maximize: "Maximize",
+        restore: "Restore",
+        theme: "Theme",
+        language: "Language",
+        light: "Light",
+        dark: "Dark",
+        system: "Follow system",
+        language_auto: "Follow system",
+        language_zh: "简体中文",
+        language_en: "English",
+        expandSidebar: "Expand sidebar",
+        collapseSidebar: "Collapse sidebar",
+        pendingTitle: "This page will be migrated in Phase 3",
+        pendingDescription: "The application shell and data layer are ready. Business pages will be added in the next phase.",
+        closeWindow: "Close Window",
+        closeQuestion: "Would you like to minimize to system tray or exit the application?",
+        trayExplanation: "When minimized to tray, the app continues running and the proxy remains available. Click the tray icon to reopen it.",
+        minimizeToTray: "Minimize to Tray",
+        quit: "Exit Application",
+        rememberChoice: "Remember my choice",
+        noTasks: "No tasks",
+        task_running: "Running",
+        task_paused: "Paused",
+        task_success: "Completed",
+        task_failed: "Failed",
+        task_cancelled: "Cancelled",
+        taskCounts: "{success} succeeded, {failed} failed",
+        pause: "Pause",
+        resume: "Resume",
+        remove: "Remove",
+        cancelAll: "Cancel all",
+        clearFinished: "Clear finished",
+    },
+
   // Common
   common: {
     confirm: 'Confirm',
