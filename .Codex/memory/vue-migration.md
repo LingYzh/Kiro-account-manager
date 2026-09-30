@@ -24,6 +24,15 @@
 - `mock.timers.tick(ms)` 只触发"当前已到期"的定时器；如果还有 Promise 在等待尚未到期的定时器就直接 `await Promise.all(...)`，Node 会报 "Detected unsettled top-level await" 并以 exit code 13 退出——必须先 `tick` 够，让所有挂起定时器都触发过一轮，才能安全 await。
 - Node 22 全局 `navigator` 只有 getter，`globalThis.navigator = {...}` 直接赋值会抛 TypeError，需要 `Object.defineProperty(globalThis, 'navigator', { value: {...}, configurable: true })`。
 
+## Phase 0 配置结果（2026-09-30）
+
+- electron-vite 默认渲染层入口固定为 `src/renderer/index.html`；`--mode vue` 必须在 `electron.vite.config.ts` 里显式改写 `renderer.root` 为 `src/renderer-vue`、`build.rollupOptions.input` 指向 `src/renderer-vue/index.html`，否则仍会打包 React 入口。`resolve.dedupe: ['vue']` 防止依赖树里出现两份 vue 实例。别名 `@`/`@renderer` 两版各自指向自己的 `src/`，`@shared` 两版共用同一个 `src/renderer-shared/`。
+- `src/renderer-shared/` 现含 `types/`（account、machineId、proxy）、`i18n/locales/`（en、zh）、`lib/`（utils、dotVariants、rateLimiter、accountHelpers、webhookPayload），全部 `.ts`。React 侧原文件对可复用符号改为 `export { ... } from '@shared/...'` 重导出，只保留依赖 React/clsx/tailwind 类型的部分（如 `cn()`、返回 `CSSProperties` 的样式生成函数）。
+- 特征测试：`test/renderer-shared.mjs`（共享纯函数，逐模块覆盖）、`test/renderer-accounts-store.mjs`（esbuild 打包 `src/renderer/src/store/accounts.ts` 后用 mock `window.api`/`localStorage`/定时器跑持久化、防抖落盘、筛选排序统计、导入导出、代理池五类场景），均已接入 `npm run test:compat` 末尾。两个文件均 4 空格缩进；打包对象只读现有 React 源码，不改源码行为。
+- `npm run typecheck:vue`（`vue-tsc -p tsconfig.vue.json`）目前只验证了 `App.vue` 里 `import { UiCard } from '@lingyzh/ui'` 这一条路径，结果是零错误；`@lingyzh/ui` 其余组件尚未被任何 Vue 源码引用过，在 TS 5.9 + vue-tsc 3.3.11 下能否通过还未验证，后续每接入一个新组件都要留意 typecheck:vue 是否新增报错。
+- ESLint：React 相关规则块（`flat.recommended`/`jsx-runtime`/react-hooks/react-refresh）原本无 `files` 限定、全局生效，改法是在这些块上加 `ignores: ['src/renderer-vue/**']`，不收窄 React 侧的匹配范围；Vue 专属块只作用于 `src/renderer-vue/**/*.{js,vue}`，用 `vue-eslint-parser` + `parserOptions.parser: tseslint.parser` 解析脚本部分，显式挂 `processor: 'vue/vue'`（缺失会让 `vue/comment-directive` 的占位报告冒出成真实 error）。规则表按字段名合并 `eslint-plugin-vue` flat/recommended 数组里各档 `rules`（不按数组下标取，避免插件升级后静默丢规则），并覆盖 `vue/html-indent: [error, 4]`。改动前后用 `eslint --format json` 统计 React 侧 errorCount/warningCount，确认未回退。
+- Prettier：`.prettierrc.yaml` 用 `overrides` 对 `src/renderer-vue/**` 与 `src/renderer-shared/**` 单独设 `tabWidth: 4`，其余（React 侧）仍是默认 2 空格，两套缩进规则并存于同一份配置。
+
 ## 子代理配置
 
 - 项目 `.claude/agents/` 定义 `kam-explore`（medium，只读）、`kam-assemble`（high）、`kam-logic`（xhigh），均为 `claude-sonnet-5[1m]`。调用时不传 `model` 参数，否则工具参数会覆盖 frontmatter 退回 200K 窗口；新建或修改后需重启会话生效。
