@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { X, Search, Check, User, CreditCard, Zap, Mail, AlertCircle, Ban } from 'lucide-react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Badge } from '../ui'
-import type { Account } from '../../types/account'
+import type { Account } from '@shared/types/account'
 
 interface AccountSelectDialogProps {
   open: boolean

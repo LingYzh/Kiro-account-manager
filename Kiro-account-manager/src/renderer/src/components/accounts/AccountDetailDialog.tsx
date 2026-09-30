@@ -4,7 +4,7 @@ import { X, RefreshCw, User, CreditCard, Key, Cpu, Loader2, FileText, Image, Has
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
-import type { Account } from '@/types/account'
+import type { Account } from '@shared/types/account'
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'

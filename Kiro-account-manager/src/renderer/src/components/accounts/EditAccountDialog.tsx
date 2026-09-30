@@ -3,7 +3,7 @@ import { X, Loader2, RefreshCw, Download, CheckCircle, Copy, Check } from 'lucid
 import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
 import { useAccountsStore } from '@/store'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { Account, SubscriptionType } from '@/types/account'
+import type { Account, SubscriptionType } from '@shared/types/account'
 
 interface EditAccountDialogProps {
   open: boolean

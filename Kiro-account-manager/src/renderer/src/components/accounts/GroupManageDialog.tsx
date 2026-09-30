@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { AccountGroup } from '@/types/account'
+import type { AccountGroup } from '@shared/types/account'
 import { X, Plus, Edit2, Trash2, Users, Check, FolderOpen } from 'lucide-react'
 
 interface GroupManageDialogProps {

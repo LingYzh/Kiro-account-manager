@@ -2,7 +2,7 @@ import { memo, useState, useMemo, useCallback } from 'react'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Badge, Button } from '../ui'
-import type { Account, AccountTag, AccountGroup } from '@/types/account'
+import type { Account, AccountTag, AccountGroup } from '@shared/types/account'
 import {
   Check,
   RefreshCw,

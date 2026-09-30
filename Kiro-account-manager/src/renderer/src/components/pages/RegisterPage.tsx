@@ -3,12 +3,12 @@ import { UserPlus, Mail, Key, Loader2, CheckCircle2, XCircle, Trash2, Play, Squa
 import { useTranslation } from '@/hooks/useTranslation'
 import { useAccountsStore } from '@/store/accounts'
 import { useTaskStore } from '@/store/tasks'
-import { createRateLimiter, type RateLimiter, type RateLimiterSnapshot } from '@/store/rateLimiter'
+import { createRateLimiter, type RateLimiter, type RateLimiterSnapshot } from '@shared/lib/rateLimiter'
 import { useWebhookStore } from '@/store/webhooks'
 import { Card, CardContent, CardHeader, CardTitle, Button, Input, Label, Progress, Badge, Switch } from '../ui'
 import { cn } from '@/lib/utils'
 import { appendSubscriptionLink, updateSubscriptionLink } from './SubscriptionPage'
-import { generateNextDotVariant, countSameRootVariants, totalVariantCount, splitEmail } from '@/lib/dotVariants'
+import { generateNextDotVariant, countSameRootVariants, totalVariantCount, splitEmail } from '@shared/lib/dotVariants'
 
 // 失败错误码归类：用于失败重试队列的过滤
 type ErrCategory =

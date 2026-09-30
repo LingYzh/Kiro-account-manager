@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Select } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { SubscriptionType } from '@/types/account'
+import type { SubscriptionType } from '@shared/types/account'
 import { X, Loader2, Download, Copy, Check, ExternalLink, Info, EyeOff } from 'lucide-react'
 import { splitCredentialLine } from '@/lib/utils'
 

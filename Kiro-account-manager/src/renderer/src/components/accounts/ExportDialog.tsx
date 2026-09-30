@@ -5,7 +5,7 @@ import { X, FileJson, FileText, Table, Clipboard, Check, Download, Key, Braces }
 import { cn } from '@/lib/utils'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { Account } from '@/types/account'
+import type { Account } from '@shared/types/account'
 
 type ExportFormat = 'json' | 'oidc' | 'txt' | 'csv' | 'kami' | 'clipboard'
 

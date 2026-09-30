@@ -4,7 +4,7 @@ import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { AccountCard } from './AccountCard'
 import { AccountDetailDialog } from './AccountDetailDialog'
-import type { Account } from '@/types/account'
+import type { Account } from '@shared/types/account'
 import { Plus } from 'lucide-react'
 
 interface AccountGridProps {

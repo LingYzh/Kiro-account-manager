@@ -5,8 +5,8 @@
 
 import { useMemo } from 'react'
 import { useAccountsStore } from '@/store/accounts'
-import en from '@/i18n/locales/en'
-import zh from '@/i18n/locales/zh'
+import en from '@shared/i18n/locales/en'
+import zh from '@shared/i18n/locales/zh'
 
 type Language = 'auto' | 'en' | 'zh'
 

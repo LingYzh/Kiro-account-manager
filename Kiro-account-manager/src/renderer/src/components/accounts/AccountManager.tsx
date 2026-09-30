@@ -10,7 +10,7 @@ import { GroupManageDialog } from './GroupManageDialog'
 import { TagManageDialog } from './TagManageDialog'
 import { ExportDialog } from './ExportDialog'
 import { Button } from '../ui'
-import type { Account } from '@/types/account'
+import type { Account } from '@shared/types/account'
 import { splitCredentialLine } from '@/lib/utils'
 import { ArrowLeft, Loader2, Users } from 'lucide-react'
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Button } from '../ui'
 import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { AccountFilter as FilterType, SubscriptionType, AccountStatus, IdpType } from '@/types/account'
+import type { AccountFilter as FilterType, SubscriptionType, AccountStatus, IdpType } from '@shared/types/account'
 import { cn } from '@/lib/utils'
 
 const SubscriptionOptions: { value: SubscriptionType; label: string; color: string; activeColor: string }[] = [

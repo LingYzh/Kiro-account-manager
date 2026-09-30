@@ -4,8 +4,8 @@
  */
 
 import { create } from 'zustand'
-import en from './locales/en'
-import zh from './locales/zh'
+import en from '@shared/i18n/locales/en'
+import zh from '@shared/i18n/locales/zh'
 
 export type Language = 'en' | 'zh' | 'auto'
 

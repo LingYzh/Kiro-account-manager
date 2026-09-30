@@ -5,7 +5,7 @@ import { Users, CheckCircle, AlertTriangle, Clock, Zap, Shield, Fingerprint, Fol
 import kiroLogo from '@/assets/kiro-high-resolution-logo-transparent.png'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/hooks/useTranslation'
-import type { Account, AccountFilter } from '@/types/account'
+import type { Account, AccountFilter } from '@shared/types/account'
 
 // 额度告急阈值（usage.percentUsed 为 0-1 小数）
 const QUOTA_WARN_RATIO = 0.9

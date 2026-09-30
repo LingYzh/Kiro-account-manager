@@ -9,8 +9,8 @@ import { useAccountsStore } from '@/store/accounts'
 import { useTranslation } from '@/hooks/useTranslation'
 import { Card, CardContent, CardHeader, CardTitle, Button, Input, Label, Switch, Badge } from '../ui'
 import { cn } from '@/lib/utils'
-import type { ProxyEntry, ProxyPoolStrategy } from '@/types/proxy'
-import { IP_DETECT_ENDPOINTS } from '@/types/proxy'
+import type { ProxyEntry, ProxyPoolStrategy } from '@shared/types/proxy'
+import { IP_DETECT_ENDPOINTS } from '@shared/types/proxy'
 
 const STRATEGY_OPTIONS: { value: ProxyPoolStrategy; label: string; labelEn: string; desc: string; descEn: string }[] = [
   { value: 'round_robin', label: '轮询', labelEn: 'Round Robin', desc: '依次使用每个代理', descEn: 'Use each proxy in sequence' },

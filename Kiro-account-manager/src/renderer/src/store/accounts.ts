@@ -14,14 +14,14 @@ import type {
   AccountSubscription,
   SubscriptionType,
   IdpType
-} from '../types/account'
+} from '@shared/types/account'
 import type {
   ProxyEntry,
   ProxyPoolConfig,
   ProxyValidationResult,
   ProxyProtocol
-} from '../types/proxy'
-import { DEFAULT_PROXY_POOL_CONFIG } from '../types/proxy'
+} from '@shared/types/proxy'
+import { DEFAULT_PROXY_POOL_CONFIG } from '@shared/types/proxy'
 import { useWebhookStore, type WebhookEvent, type WebhookMessage } from './webhooks'
 
 // ============================================
