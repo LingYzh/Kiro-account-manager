@@ -17,6 +17,7 @@
 - `src/main/ipc/`：Electron 主进程 IPC。
 - `src/renderer/`：React 界面；`src/preload/`：主进程与界面的桥接。
 - `test/e2e-fullsuite/`：代理 HTTP 回归测试。
+- 已预装 `@lingyzh/ui@0.1.0` 与 `vue@3.5.43`，渲染层正按计划从 React 迁到 Vue 3 + Pinia + `@lingyzh/ui`（并行目录 `src/renderer-vue/`，electron-vite `--mode vue` 切换）；当前代码未引用。该包以 `.ts/.vue` 源码发布，UI 库缺失的通用组件必须先在 UI 仓库补齐发布再引用。持久化兼容与子代理配置详见 `.Codex/memory/vue-migration.md`。
 
 ## 非常规约定
 

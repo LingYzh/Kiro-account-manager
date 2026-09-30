@@ -27,6 +27,7 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "@lingyzh/ui": "0.1.0",
     "@tailwindcss/vite": "^4.1.17",
     "@tanstack/react-virtual": "^3.13.12",
     "cbor-x": "^1.6.0",
@@ -44,6 +45,7 @@
     "tlsclientwrapper": "^4.2.0",
     "undici": "^7.19.2",
     "uuid": "^13.0.0",
+    "vue": "3.5.43",
     "zustand": "^5.0.9"
   },
   "devDependencies": {
