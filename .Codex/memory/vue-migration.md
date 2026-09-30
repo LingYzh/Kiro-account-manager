@@ -16,6 +16,13 @@
 - 保留 `accounts.ts` 的 500ms 防抖 + 5s 强制落盘 + 在途合并时序。
 - `currentMachineId/originalMachineId/originalBackupTime` 不在 `flushSaveImmediately` 写入字段内，迁移不改变这一语义。
 - 迁移前先用 `test/renderer-*.mjs` 特征测试锁定 React 版行为，Pinia 版必须同样通过。
+- `test/renderer-accounts-store.mjs`（Task 6）已用特征测试锁定 accounts store 持久化、保存时序、筛选排序统计、导入导出、代理池行为，作为 Pinia 版验收基线；`autoRefreshSyncInfo` 同样是"读入内存但从不写回磁盘"的疑似 bug（`loadFromStorage` 会读，`flushSaveImmediately` 落盘对象里没有这个 key），与 `currentMachineId` 系三个字段并列。
+
+## 测试踩坑
+
+- 给 esbuild 打包后的 zustand store 做特征测试时，用 `node:test` 的 `mock.timers.enable({ apis: ['setTimeout','setInterval','Date'] })` 可以直接拦截打包产物内部调用的全局定时器，无需修改源码或额外注入。
+- `mock.timers.tick(ms)` 只触发"当前已到期"的定时器；如果还有 Promise 在等待尚未到期的定时器就直接 `await Promise.all(...)`，Node 会报 "Detected unsettled top-level await" 并以 exit code 13 退出——必须先 `tick` 够，让所有挂起定时器都触发过一轮，才能安全 await。
+- Node 22 全局 `navigator` 只有 getter，`globalThis.navigator = {...}` 直接赋值会抛 TypeError，需要 `Object.defineProperty(globalThis, 'navigator', { value: {...}, configurable: true })`。
 
 ## 子代理配置
 
