@@ -51,3 +51,9 @@
 - Agent 工具的 `model` 别名与内置 Explore/Plan 都跑在 200K 窗口（transcript `preTokens` 约 16–18 万即压缩），不能用于长程任务。
 - 2026-09-29 已实测 `kam-explore` 生效：transcript 系统提示显示 `claude-sonnet-5[1m]`，KAM 日志 `contextUsageEvent … modelContext=1000000, model=claude-sonnet-5`。子代理起始上下文约 13.4 万 token，200K 窗口下几乎没有工作余量。
 - 子代理提示必须限定：超过 800 行的文件只 Grep 或分段 Read，单一主题、限定输出长度。整读 RegisterPage 等大文件曾导致子代理反复压缩失败。
+
+## @lingyzh/ui 升级踩坑
+
+- 本机 `~/.npmrc` 的默认源是 `registry.npmmirror.com`。用它 `npm install @lingyzh/ui` 时，lockfile 的 resolved 会写成镜像地址，而刚发布的版本镜像还没同步，可能根本装不到。
+- 做法：升级后把 lockfile 中 `node_modules/@lingyzh/ui` 的 resolved 改回 `https://registry.npmjs.org/@lingyzh/ui/-/ui-<版本>.tgz`，并确认 integrity 与 `npm view @lingyzh/ui@<版本> dist.integrity --registry https://registry.npmjs.org/` 一致。
+- 当前版本 0.2.0（2026-09-30），包含 locale、Badge/Alert/Spinner/Menu/confirmDialog、Button danger、Dialog size 与 placement=end、Input 数字模式。
