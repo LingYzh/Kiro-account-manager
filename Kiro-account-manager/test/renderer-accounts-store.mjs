@@ -257,18 +257,22 @@ try {
 
         // 基线：AccountData 接口里声明的 4 个字段（autoRefreshSyncInfo/currentMachineId/
         // originalMachineId/originalBackupTime）输入里都给了值，但 flushSaveImmediately 的
-        // 落盘对象里完全没有这些 key —— 疑似 bug：autoRefreshSyncInfo 有专门的 setter
-        // （setAutoRefreshSyncInfo）会调用 saveToStorage，但改动永远不会真正写入磁盘；
-        // currentMachineId/originalMachineId/originalBackupTime 连 loadFromStorage 都不读取
-        // data 里的值（照实锁定，不代表其正确性，留给 Pinia 迁移决定是否修）。
-        assert.equal('autoRefreshSyncInfo' in saved, false, '疑似 bug：autoRefreshSyncInfo 从不写回磁盘')
+        // 落盘对象里完全没有这些 key。这 4 个字段分两类疑似 bug（照实锁定，不代表其正确性，
+        // 留给 Pinia 迁移决定是否修）：
+        //   - autoRefreshSyncInfo：loadFromStorage 会读取 data.autoRefreshSyncInfo 存入内存，
+        //     且有专门的 setter（setAutoRefreshSyncInfo）会调用 saveToStorage，但改动永远不会
+        //     真正写入磁盘——"读入但不写回"。
+        //   - currentMachineId/originalMachineId/originalBackupTime：loadFromStorage 里没有
+        //     任何 data.currentMachineId 之类的读取，这 3 个字段完全不参与持久化往返
+        //     （不读不写），并非"读了不写"。
+        assert.equal('autoRefreshSyncInfo' in saved, false, '疑似 bug：autoRefreshSyncInfo 读入但不写回磁盘')
         assert.equal('currentMachineId' in saved, false)
         assert.equal('originalMachineId' in saved, false)
         assert.equal('originalBackupTime' in saved, false)
         // 而 loadFromStorage 确实把 autoRefreshSyncInfo 读入了内存状态（只是不会存回）
         assert.equal(useAccountsStore.getState().autoRefreshSyncInfo, false)
-        // currentMachineId/originalMachineId/originalBackupTime 在内存里也维持初始默认值，
-        // 完全未被输入文档覆盖（loadFromStorage 里没有任何 data.currentMachineId 之类的读取）
+        // currentMachineId/originalMachineId/originalBackupTime 在内存里维持初始默认值，
+        // 完全未被输入文档覆盖——因为 loadFromStorage 不读取 data 里的这三个字段
         assert.equal(useAccountsStore.getState().currentMachineId, '')
         assert.equal(useAccountsStore.getState().originalMachineId, null)
         assert.equal(useAccountsStore.getState().originalBackupTime, null)
@@ -619,13 +623,56 @@ try {
         assert.deepEqual(pickSeq(4), ['p1', 'p2', 'p3', 'p1'])
 
         // least_used：初始 usedCount 全为 0 时 reduce 保留首个（p1），每次挑中后计数 +1，
-        // 下次自然轮到当前最小的那个——从零开始时序列恰好也是 p1,p2,p3,p1（reduce 平局不换）
+        // 下次自然轮到当前最小的那个——从零开始时序列恰好也是 p1,p2,p3,p1，与 round_robin
+        // 巧合相同，不足以区分两个策略。
         await loadWithStrategy('least_used')
         assert.deepEqual(pickSeq(4), ['p1', 'p2', 'p3', 'p1'])
+
+        // least_used（不均匀起始值）：显式把 usedCount 设成 p1=2、p2=0、p3=1，验证选取的确是
+        // "每次挑当前最小值"而非顺序轮询——若按 round_robin 的顺序轮询逻辑，序列应为
+        // p1,p2,p3,p1；但 least_used 的真实序列是 p2,p2,p3,p1（具体推导见下方 pickSeq 调用旁注释）。
+        loadAccountsReturnValue = {
+            accounts: {}, groups: {}, tags: {}, activeAccountId: null,
+            autoRefreshEnabled: true, autoRefreshInterval: 5, statusCheckInterval: 60,
+            proxyPool: {
+                p1: { ...freshPool().p1, usedCount: 2 },
+                p2: { ...freshPool().p2, usedCount: 0 },
+                p3: { ...freshPool().p3, usedCount: 1 }
+            },
+            proxyPoolConfig: { enabled: true, strategy: 'least_used', validateOnStartup: false, autoDisableDead: true, failureThreshold: 3, testUrl: 't', testTimeoutMs: 1000, autoValidateIntervalMin: 0, autoValidateConcurrency: 1 },
+            proxyPoolCursor: 0
+        }
+        await st().loadFromStorage()
+        // 手算序列（reduce 从 p1 起步逐个比较，平局保留先出现者）：
+        //   pick1: p1=2,p2=0,p3=1 -> 选 p2（0 最小），p2 变 1
+        //   pick2: p1=2,p2=1,p3=1 -> 与 p3 平局，reduce 保留先出现的 p2，p2 变 2
+        //   pick3: p1=2,p2=2,p3=1 -> 选 p3（1 最小），p3 变 2
+        //   pick4: p1=2,p2=2,p3=2 -> 三者打平，reduce 保留最先出现的 p1
+        const leastUsedSeq = pickSeq(4)
+        assert.deepEqual(leastUsedSeq, ['p2', 'p2', 'p3', 'p1'])
+        // 明确区分度：与 round_robin 按插入顺序轮询的序列（p1,p2,p3,p1）不同，
+        // 证明这里测的确实是"挑当前最小值"而非顺序轮询
+        assert.notDeepEqual(leastUsedSeq, ['p1', 'p2', 'p3', 'p1'])
+
+        resetAll()
 
         // fastest：按 latencyMs 升序，p2=100 最小且延迟不受挑选影响，始终选中同一个
         await loadWithStrategy('fastest')
         assert.deepEqual(pickSeq(3), ['p2', 'p2', 'p2'])
+
+        // fastest（延迟变化后改选）：把 p2 的延迟改大、p3 改小，走真实的 validateProxy 路径
+        // （源码 3070-3097 行：验活成功后按 latencyMs 更新 status/latencyMs），而不是直接改
+        // store 状态，这样也覆盖了 validateProxy 对 fastest 排序输入的真实更新链路。
+        window.api.proxyPoolValidate = async () => ({ success: true, latencyMs: 500 }) // 覆盖 p2 的延迟
+        await st().validateProxy('p2')
+        assert.equal(st().proxyPool.get('p2').latencyMs, 500)
+        window.api.proxyPoolValidate = async () => ({ success: true, latencyMs: 50 }) // 覆盖 p3 的延迟
+        await st().validateProxy('p3')
+        assert.equal(st().proxyPool.get('p3').latencyMs, 50)
+        // 恢复默认 mock，避免影响后续用例
+        window.api.proxyPoolValidate = async () => ({ success: true, latencyMs: 100 })
+        // 现在 p3(50) < p1(200) < p2(500)，fastest 应改选 p3
+        assert.deepEqual(pickSeq(3), ['p3', 'p3', 'p3'])
 
         // random：挑选依赖 Math.random()，临时替换为可控序列以得到确定性断言
         await loadWithStrategy('random')
@@ -677,6 +724,35 @@ try {
         // 非连接层错误（业务/风控失败）不计入 failCount，即使反复上报也不会触发停用
         st().reportProxyResult('p1', false, undefined, 'Portal error: email already registered')
         assert.equal(st().proxyPool.get('p1').failCount, 2, '业务失败不累加 failCount')
+
+        resetAll()
+
+        // ---- 5d：pickNextProxy 无可用候选时返回 null；恢复可用后重新参与选取 ----
+        // 源码 3133-3140 行：候选过滤条件是 `p.enabled && p.status !== 'dead'`，
+        // 过滤后为空数组时直接 return null（不区分具体策略）。
+        loadAccountsReturnValue = {
+            accounts: {}, groups: {}, tags: {}, activeAccountId: null,
+            autoRefreshEnabled: true, autoRefreshInterval: 5, statusCheckInterval: 60,
+            proxyPool: {
+                // p1：enabled=false 被过滤
+                p1: { id: 'p1', url: 'http://h1:1', protocol: 'http', host: 'h1', port: 1, status: 'alive', usedCount: 0, failCount: 0, enabled: false, createdAt: 1 },
+                // p2：enabled=true 但 status='dead' 同样被过滤
+                p2: { id: 'p2', url: 'http://h2:1', protocol: 'http', host: 'h2', port: 1, status: 'dead', usedCount: 0, failCount: 3, enabled: true, createdAt: 1 }
+            },
+            proxyPoolConfig: { enabled: true, strategy: 'round_robin', validateOnStartup: false, autoDisableDead: true, failureThreshold: 2, testUrl: 't', testTimeoutMs: 1000, autoValidateIntervalMin: 0, autoValidateConcurrency: 1 },
+            proxyPoolCursor: 0
+        }
+        await st().loadFromStorage()
+
+        assert.equal(st().pickNextProxy(), null, '全部代理都不可用时应返回 null')
+        assert.equal(st().pickNextProxy(), null, '连续调用仍应稳定返回 null（不抛异常、不改变游标语义）')
+
+        // 恢复路径：源码里没有"验活自动恢复 enabled"的逻辑（validateProxy 成功只会保持/维持
+        // enabled，不会把已停用的代理重新打开），真正能让代理重新参与选取的是显式调用
+        // toggleProxyEnabled 重新启用。这里验证恢复后重新参与选取。
+        st().toggleProxyEnabled('p1', true)
+        assert.equal(st().proxyPool.get('p1').enabled, true)
+        assert.deepEqual(pickSeq(2), ['p1', 'p1'], '重新启用后应恢复参与选取')
 
         originalConsole.log('[accounts-store] 覆盖项 5（代理池）通过')
         resetAll()
