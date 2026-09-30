@@ -23,7 +23,7 @@
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
-    "test:compat": "node test/compat-capabilities.mjs && node test/compat-responses.mjs && node test/compat-eventstream.mjs && node test/compat-context.mjs && node test/compat-request-errors.mjs && node test/compat-gateway.mjs && node test/compat-usage.mjs && node test/compat-client-config.mjs && node test/compat-desktop-config.mjs && node test/e2e-fullsuite/compatibility.mjs",
+    "test:compat": "node test/compat-capabilities.mjs && node test/compat-responses.mjs && node test/compat-eventstream.mjs && node test/compat-context.mjs && node test/compat-request-errors.mjs && node test/compat-gateway.mjs && node test/compat-usage.mjs && node test/compat-client-config.mjs && node test/compat-desktop-config.mjs && node test/e2e-fullsuite/compatibility.mjs && node test/renderer-shared.mjs",
     "test:e2e": "node test/e2e-fullsuite/run.mjs",
     "test:e2e:only": "node test/e2e-fullsuite/run.mjs --only"
   },
