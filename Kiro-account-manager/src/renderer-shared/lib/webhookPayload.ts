@@ -1,8 +1,8 @@
 /**
- * Webhook 消息体构造（框架无关部分）— 供 store/webhooks.ts 共用
+ * Webhook 消息体构造（框架无关部分）— 供 Vue webhooks store 复用
  *
  * 注意：`sendWebhook` 的 fetch 请求与本地速率限制逻辑依赖 store 内部状态，
- * 未移入本文件，仍留在 src/renderer/src/store/webhooks.ts。
+ * 留在 Vue webhooks store 中，不属于此纯函数模块。
  */
 
 export type WebhookKind = 'dingtalk' | 'wechat-work' | 'telegram' | 'discord' | 'feishu' | 'custom'

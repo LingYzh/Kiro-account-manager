@@ -7,3 +7,6 @@ indent_size = 2
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
+
+[{electron.vite.config.ts,eslint.config.mjs,package.json,tsconfig.web.json,tsconfig.vue.json,.vscode/launch.json,scripts/dev.mjs,test/renderer-*.mjs,test/fixtures/vue-*.{ts,cjs},src/renderer-vue/**,src/renderer-shared/**}]
+indent_size = 4

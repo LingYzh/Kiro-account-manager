@@ -120,7 +120,7 @@ function getTrayIconPath(): string {
     }
     return join(__dirname, '../../resources/icon.ico')
   } else if (process.platform === 'darwin') {
-    // macOS 使用 Template 图标（自动适应深色/浅色模式）
+    // macOS 保留应用图标的原色
     if (app.isPackaged) {
       return join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'icon.png')
     }
@@ -330,10 +330,9 @@ export function createTray(cbs: TrayCallbacks): Tray | null {
     const iconPath = getTrayIconPath()
     let icon = nativeImage.createFromPath(iconPath)
     
-    // macOS 需要设置为 Template 图标
+    // macOS 使用原色图标，避免系统按 Template 图标反色
     if (process.platform === 'darwin') {
       icon = icon.resize({ width: 16, height: 16 })
-      icon.setTemplateImage(true)
     } else if (process.platform === 'win32') {
       // Windows 图标大小调整
       icon = icon.resize({ width: 16, height: 16 })

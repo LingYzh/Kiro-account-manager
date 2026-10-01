@@ -1,5 +1,7 @@
 # 渲染层 React → Vue 3 + @lingyzh/ui 迁移
 
+当前检查点（2026-10-01）：用户授权 Phase 4 后，默认 dev/build/typecheck:web 已切换 Vue，旧 React 源码与依赖已归档/移除。当前信息以根目录 HANDOFF.md 和 docs/vue-phase4-validation.md 为准；下面按日期保留历史阶段记录，历史“默认 React/Phase 4 未开始”不再代表当前状态。
+
 ## 目标与决策（2026-09-29）
 
 - 渲染层从 React 19 + zustand + Tailwind 4 迁到 Vue 3.5 + Pinia + `@lingyzh/ui`（自研 UI 库，源码仓库 `E:\WebstormProjects\UI`，参考消费方 `E:\WebstormProjects\UAH-desktop`）。
@@ -108,3 +110,58 @@
 - 仓库根目录 `HANDOFF.md` 已整理恢复命令、白屏排查入口、代码与兼容边界、已通过检查、Phase 3 五批页面迁移和 Phase 4 切换/清理条件。另一设备无需依赖旧设备的 Claude 本地计划、transcript 或临时生成脚本。
 - 新增 Vue 离线 runtime 测试没有挂载真实 App.vue 或 Electron 页面，因此离线通过不能替代渲染验收。接续先抓首条 Renderer 错误，区分入口加载/挂载失败与已有 DOM 的布局问题，基于证据修复并补对应验证。
 - Phase 3 尚未开始；CloseConfirmDialog 已提前迁入 Phase 2，不重复迁移。Phase 4 必须等待全部业务页对齐并通过用户运行验收。默认 React 入口与版本 1.7.9 暂不变。
+
+## 2026-10-01 接续：白屏、纵向 Tabs、主题与 Ripple
+
+- 按用户要求先将 `D:/UI` main 对齐 `origin/main` 的 `059f785`；原本领先的四个本地提交保存到 `backup/ui-before-upstream-align-20261001`，main 工作区干净且 ahead/behind 为 0/0。没有推送或删除远端提交。
+- 真实 Electron 离线 preload 复现空 `#app`：首条 Renderer 错误为 highlight.js core 的 CommonJS 默认导出缺失。Vue electron-vite 分支排除 UI 源码包的预构建，并显式 include 嵌套 highlight.js core/语言、markdown-it 与插件；用户在原 dev:vue 路径确认界面正常显示。
+- 用户选择纵向 UiTabs，保留折叠与展开、15 个导航 ID/顺序、首次访问后实例保留；App 接入 UiTabPanel 的对应标签关联，移除导航 UiTooltip。折叠图标提供 native title 与无障碍名称，展开只保留文字。
+- 用户要求深色同 UI 库，并反馈实际主界面仍浅色蓝色。根因是 scoped `:global(:root[data-theme='dark']) .kam-logo` 被 Vue 编译为根元素 `filter: invert(1)`，整页被反色，top layer 弹窗/菜单正常。修正为普通 `:root[...] .kam-logo`，只有 Logo 加 scoped 属性并反色；减少动效同类选择器一起修正。computed colors 不能替代像素或祖先 filter 检查。
+- 主代理通过 computer-use 查看用户实际窗口，确认深色中性背景与陶土橙已恢复。关闭确认的“记住我的选择”使用 UiCheckbox slot 修复；Vue CSP 单独允许 self/data 字体，支持 UI 库生产内联字体。
+- 用户截图还发现底部主题/语言/折叠菜单 ripple 跑到左上角。真实 Electron 检查确认折叠时按钮含 ui-ripple-target/relative，展开后的 Vue class patch 删掉该类，指令仍创建 wave/layer，但 offsetParent 已变成页面。
+- 通用修复按 UI-first 放在独立 `D:/UI-ripple-fix` 的 `codex/fix-ripple-update` 工作树，基于上游 `059f785`；指令 updated 恢复定位类，增加真实动态 class demo、ripple 专项与文档。类型、23 单测、完整 UI 20/20、ripple 66 断言、A 批 7/7、B 批 6/6通过，root 验收浅深 held 图。用户授权后发布提交 `cd9d3ce` 与 `v0.2.2` 已原子推送，GitHub Actions 36757427137 的 OIDC Publish/provenance 成功，官方 registry/latest 为 0.2.2。KAM package/lock/实际安装正式升级，仅替换 UI 一个包，integrity 与 registry 一致；原 `D:/UI` main 已快进并保持干净，上游不再包含旧四个本地提交。
+- 新 `npm run test:vue-shell` 使用真实 Electron、实际 Vue 入口、合成数据/临时 userData/离线 preload，开发与构建 file 入口分别验证。新增根元素 filter、最终组件色和三按钮展开前后 ripple 定位断言；`--ui-source <目录>` 仅显式验证候选来源，报告标注版本/目录，默认仍是正式依赖。候选可预热 Vite 依赖，默认模式仍覆盖开发冷启动。
+- 不要在用户运行 Electron 时用 `--package-lock=false` 尝试临时安装 UI；该参数忽略锁文件并可能重整整个依赖树，遇到 Electron 文件锁。此次 package/lock 未变，核对核心安装版本与锁文件一致、类型检查通过后改为隔离验证。正式升级应在发布后正常读取 lockfile。
+- 本会话编排按用户均衡偏好，关键执行用 GPT-6 Sol medium 代替 Terra；Luna 只做机械源码盘点，不参与决策或美学。后续继续服从当次用户模型要求，不把当前配置误写为永久规则。
+- 用户提供的新透明 PNG 原样保存为共享 `assets/kam-logo.png`（1254×1254），Vue 侧栏与 React 的侧栏/首页/关于页/标题栏共用；浅深模式均不反色。应用/托盘/安装器图标同步，仅通过 electron-builder 转换 ICO/ICNS，macOS 托盘保留原色而非 Template。旧 SVG/厂商图片保留历史文件，不作为应用品牌入口。
+- 最终正式 npm 0.2.2 的 `test:vue-shell` 开发冷启动 65 项、构建 file 入口 64 项通过，Renderer 错误为零；证据 `C:/Users/AnnaC/AppData/Local/Temp/kam-vue-shell-tgLyHi/`。涵盖浅深与折叠展开 Logo 加载/无滤镜、三按钮 ripple、组件颜色与深色卡片实际像素。root 检查 dev-dark-expanded/prod-light-collapsed 后接受。Vue 类型检查、React 和 Vue 完整构建通过；最新 out 为 Vue。
+- Phase 3 的第一批源码、依赖、组件与验证清单已整理到 `docs/vue-phase3-small-pages-plan.md`；尚未迁移业务页，React 默认渠道不变。实际托盘、OS 及真实账号往返清单仍见 `docs/vue-phase2-validation.md`。UI 已提交/推送/发布；KAM 本次修改尚未提交或推送，未发布新版本。
+
+## 2026-10-01 Phase 3 第一批检查点
+
+- About/Webhooks/Logs/Diagnose/ConfigSync/MachineId/KiroSettings/KProxy 八页已接入并保留访问后实例；正式 UI 0.2.2，未引入通用控件或依赖。
+- 用户要求移除加入群聊按钮：React/Vue About 均移除按钮和 QR 弹窗，原 React 资产保留，Vue 无群聊图片引用。
+- 合并真实 Electron 离线回归 dev 414、build/file 413 项通过（kam-vue-shell-PeT7So），完整 compat 和 React build 通过；合成 IPC 与临时 userData，未使用真实账号/网络/系统变更。
+- 更新细节和系统验收边界见 docs/vue-phase3-validation.md。首页/设置/ExportDialog/UpdateDialog 验收中，账号/代理/注册/订阅尚待接续，整个 Phase 3 未完成。
+- 本会话用户明确选均衡子代理配置，以 GPT-6 Sol medium 替代 Terra；未使用 Luna 进行决策/美学，root 负责设计和验收。
+
+## 2026-10-01 Phase 3 全页面实现
+
+- 原八页之后完成首页、设置、账号、API 反代、代理池、订阅与注册，全部 15 个导航映射到实际 Vue 页面；导出、更新以及各模块业务弹窗一并迁移，未知导航才走 PagePending。隐藏页保留实例，实际卸载释放监听与定时器。
+- 首页风险入口替换筛选；设置保持持久化白名单与旧 theme 透传；六类导出格式和两套配置同步信封保持兼容。账号列表/卡片使用虚拟化，保留 IDE/CLI 调用顺序与失败边界、凭证验证和账号代理选择的 alive 条件。ResizeObserver 在动画帧测量，尺寸仅在宽度/数据/视图改变时重新计算。
+- 代理配置串行写入且启动等待，账号组变化合并重同步；保留完整模型上下文、未知模型 ID、映射 effort、客户端配置、Desktop preview token/应用/恢复、Key 作用域/usage、安全/IP/TLS/审计。代理池保持四策略、五状态、候选分桶与详情 alive 的不同原语义。
+- 订阅使用当前 Pinia 的共享状态，注册可在订阅页创建前写链接；15 分钟时效、预检/计划/超额/门户等原边界保留。清空不让在途请求复活链接，超额开启/关闭跨 tab 互斥。
+- 注册拆为业务 composable 与模板，保留六邮箱源、手动三阶段、单次 complete/返回值去重、批量任务/并发/重试/暂停/取消、严格代理、日配额/定时/限流、历史/模板/黑名单/分析。所有自动导入含密码且允许 verify.alive 快路径；点击/历史导入重验且不写密码。混合源 SWRR 即使其他权重为正，零权重候选也按旧实现增 1；golden 检查锁定该边界。运行中锁来源和配置，邮箱/OTP 和暂停/恢复/停止保留可用。
+- 新增 `npm run test:vue-contracts`，统一运行六类独立离线格式/加密/纯函数检查。`test:vue-shell` 扩展到全部页与业务弹窗，使用临时 userData、离线 preload、合成数据和实际 Electron dev/build 两入口。各 suite 主题/语言与 IPC 调用基线隔离，取消/重试断言不能被旧调用误满足。
+- 类型检查、完整 compat、合同检查、React/Vue 构建与改动范围 ESLint 已通过。正式 UI 0.2.2、无过滤完整 Electron 最终回归 dev 1204 / build-file 1203 项通过（`C:/Users/AnnaC/AppData/Local/Temp/kam-vue-shell-47KwFs/`），两入口渲染/资源/外部请求错误为零，各自仅一条已断言模拟机器码失败日志；实际卸载后全部监听归零。详情见 `docs/vue-phase3-validation.md`。最新应用 out 为 Vue，但默认 dev/build/发布仍是 React；版本仍 1.7.9。
+- 用户要求的加入群聊按钮与二维码弹窗已在 React/Vue 关于页移除。新布局继续使用正式 UI 0.2.2 与已验收 tokens/控件；没有引入通用组件或依赖。root 复核浅深色和弹窗截图。
+- HANDOFF 已更新全页面进展、代码边界和 Phase 4 条件。真实注册/收费订阅/代理服务/通知/证书/机器码/托盘/文件与系统写入仍需用户运行验收，离线回归不能代替。尚未启动 Phase 4、提交/推送或发布 KAM。
+
+## 2026-10-01 Phase 4 默认 Vue 与清理
+
+- 用户明确要求开始 Phase 4，root 据此完成默认入口切换。源码保留 renderer-vue/shared 路径，electron-vite 所有 mode 使用 Vue，输出 out/renderer 和生产加载契约不变。Windows 交互控制台 UTF-8 由跨平台 Node dev 启动器设置；Vue 旧命令保留别名。TS、ESLint、调试、四空格和三平台 build 脚本同步。
+- 旧 React 目录与两套手动预览/accounts wrapper 移出工作区，保留五组真实 Pinia golden、共享/八组 runtime/HTTP 和六类合同测试。17 项直接依赖/131 个包已移除，保留主进程/原生依赖与正式 UI 0.2.2。README 群聊联络 QR 移到 resources/community-qr.png，应用无群聊按钮。
+- 清理前逐文件比对 100 个源码的 ZIP/hash。备份 C:/Users/AnnaC/AppData/Local/Temp/kam-phase4-backup-ed99690ec13a43e391ca397f3ccc0987/，含 react-source.zip、inventory.json、retired/，ZIP SHA256 63DB50C12205F2BE7E067FB8FF418609E87F40D0D7402B8093276E95C830F4C5。包含原有未提交 React 修改。本机临时副本不能作为跨设备依赖。
+- 自动审批拒绝递归删除后改为验证路径并归档移出；npm 卸载返回成功，旧运行进程锁住 ignored Tailwind 原生临时目录，未强删/杀进程。manifest/lock 与产物无该依赖，不做 audit fix 或无关升级。
+- typecheck、定向 lint、完整 compat、六类合同、默认 build 通过；默认 dev/build-file 完整 Electron 为 1204/1203，错误零且监听释放，证据 kam-vue-shell-hFrReM。测试直接 resolveConfig({}, serve/build)，不再依赖 Vue mode。
+- Windows x64 unpacked 通过，临时包 kam-phase4-package-f1a4429d9d104bdba1143ed35b99637a；ASAR 含 main/preload/Vue 入口，排除旧运行依赖及源码/测试，Koffi/TLS DLL 存在。新增 packaged-renderer 离线 fixture 加载实际 ASAR 页面，首页/代理/外壳 195 项通过，错误零且监听释放，证据 kam-vue-packaged-ygjXM1；修复测试 asar extractFile 在 Windows 必须使用 path.join 的路径分隔符。
+- README（根/应用两套中英文）、AGENTS、HANDOFF、品牌与验收说明已更新。当前默认 Vue，版本仍 1.7.9；未提交/推送/发布 KAM，原图标/tray/IDE 改动保留。Windows universal NSIS/latest.yml 契约未改。未运行 Release CI、macOS/Linux 原生包、Windows 三架构安装器或实际账号/系统业务，边界见 docs/vue-phase4-validation.md。
+- 子代理继续用户均衡偏好、GPT-6 Sol medium 替代 Terra；root 做入口/边界决策和实际 diff/报告验收，未派 Luna 进行决策/美学。
+
+## 2026-10-01 合并与发布授权
+
+- 用户明确要求将迁移合并 master 并发布新版本。root 选择 1.8.0 对应完整 Vue/品牌升级，package/lock 两级版本及四份 README 首条日志已同步；根双语 `### v1.8.0` 符合现有 CI changelog 提取规则。
+- fetch 后 origin/master 仍为 e1a5531，是迁移分支的祖先，无远端新增分歧；合并采用 fast-forward 保留完整迁移历史。提交遵循中文动词主题、按路径正文和 Co-Authored-By: Codex/GPT-6，IDE 本地文件不提交。
+- 版本同步后的默认 npm run build（主进程/Vue 类型检查）再次通过。Phase 4 全面离线证据保留；发布通过 master 与 v1.8.0 标签推送触发三平台 Build & Release，工作流和 Windows universal NSIS/latest 契约不改。
+- 发布审查发现 macOS 矩阵上传同名清单的潜在覆盖；root 核实线上 v1.7.9 清单实际含 x64/arm64 双 ZIP 与双 DMG，显式 target.arch 使两任务均产全套，故不凭假设扩大流程改动。新 Release 后需再次核对实际双架构清单。
+- CI/Release 完成状态以 GitHub 为准；发布不代表实际账号、系统写入、安装或更新已经验收。

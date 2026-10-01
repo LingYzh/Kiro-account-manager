@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
-import { UiSnackbarHost, UiConfirmHost } from '@lingyzh/ui'
+import { UiSnackbarHost, UiConfirmHost, UiTabPanel } from '@lingyzh/ui'
 import { useAppStore } from './stores/app'
 import { useTaskStore } from './stores/tasks'
 import { summarizeTasks } from './lib/taskPresentation'
@@ -9,6 +9,40 @@ import Sidebar from './components/layout/Sidebar.vue'
 import TaskCenter from './components/layout/TaskCenter.vue'
 import PagePending from './components/layout/PagePending.vue'
 import CloseConfirmDialog from './components/CloseConfirmDialog.vue'
+import UpdateDialog from './components/UpdateDialog.vue'
+import AboutPage from './components/pages/AboutPage.vue'
+import WebhooksPage from './components/pages/WebhooksPage.vue'
+import LogsPage from './components/pages/LogsPage.vue'
+import MachineIdPage from './components/pages/MachineIdPage.vue'
+import DiagnosePage from './components/pages/DiagnosePage.vue'
+import ConfigSyncPage from './components/pages/ConfigSyncPage.vue'
+import KiroSettingsPage from './components/pages/KiroSettingsPage.vue'
+import KProxyPage from './components/pages/KProxyPage.vue'
+import HomePage from './components/pages/HomePage.vue'
+import SettingsPage from './components/pages/SettingsPage.vue'
+import AccountManager from './components/accounts/AccountManager.vue'
+import ProxyPoolPage from './components/pages/ProxyPoolPage.vue'
+import ProxyPage from './components/pages/ProxyPage.vue'
+import SubscriptionPage from './components/pages/SubscriptionPage.vue'
+import RegisterPage from './components/pages/RegisterPage.vue'
+
+const pageComponents = {
+    home: HomePage,
+    settings: SettingsPage,
+    accounts: AccountManager,
+    proxyPool: ProxyPoolPage,
+    proxy: ProxyPage,
+    subscription: SubscriptionPage,
+    register: RegisterPage,
+    about: AboutPage,
+    webhooks: WebhooksPage,
+    logs: LogsPage,
+    machineId: MachineIdPage,
+    diagnose: DiagnosePage,
+    configSync: ConfigSyncPage,
+    kiroSettings: KiroSettingsPage,
+    kproxy: KProxyPage
+}
 
 const app = useAppStore()
 const tasks = useTaskStore()
@@ -40,17 +74,22 @@ function openTasks() {
                 @toggle="app.toggleSidebar"
             />
             <main class="kam-content">
-                <!-- 首次访问后保留实例；Phase 3 逐项替换占位页。 -->
-                <PagePending
+                <!-- 全部业务页已接入，首次访问后保留实例。 -->
+                <UiTabPanel
                     v-for="page in app.visitedPages"
-                    v-show="app.currentPage === page"
                     :key="page"
-                    :page="page"
-                />
+                    :model-value="app.currentPage"
+                    :value="page"
+                    id-prefix="kam-navigation"
+                >
+                    <component :is="pageComponents[page]" v-if="pageComponents[page]" />
+                    <PagePending v-else :page="page" />
+                </UiTabPanel>
             </main>
         </div>
         <TaskCenter v-model:open="tasksOpen" />
         <CloseConfirmDialog />
+        <UpdateDialog />
         <UiSnackbarHost />
         <UiConfirmHost />
     </div>

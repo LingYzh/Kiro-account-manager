@@ -11,7 +11,7 @@ Claude Code 用户请参阅[网关兼容边界、缓存行为与推荐设置](do
 </p>
 
 <p align="center">
-  <img src="Kiro-account-manager/src/renderer/src/assets/交流群.png" width="200" alt="QQ 交流群">
+  <img src="Kiro-account-manager/resources/community-qr.png" width="200" alt="QQ 交流群">
 </p>
 
 <p align="center">
@@ -57,8 +57,7 @@ Claude Code 用户请参阅[网关兼容边界、缓存行为与推荐设置](do
 - 可配置余额阈值和检查间隔
 
 ### 🎨 个性化设置
-- 21 种主题颜色可选（按色系分组显示）
-- 深色/浅色模式切换
+- 浅色、深色和跟随系统的外观模式
 - 隐私模式隐藏敏感信息
 
 ### 🌐 代理支持
@@ -90,7 +89,7 @@ Claude Code 用户请参阅[网关兼容边界、缓存行为与推荐设置](do
 ![机器码管理](Kiro-account-manager/resources/机器码管理.png)
 
 ### 设置
-配置主题颜色、隐私模式、自动刷新、代理等选项。
+配置外观模式、隐私模式、自动刷新、代理等选项。
 
 ![设置](Kiro-account-manager/resources/设置.png)
 
@@ -180,11 +179,11 @@ xattr -cr /Applications/Kiro\ Account\ Manager.app
 
 ## 🛠️ 技术栈
 
-- **框架**: Electron + React + TypeScript
-- **状态管理**: Zustand
-- **样式**: Tailwind CSS
+- **框架**: Electron + Vue 3 + TypeScript/JavaScript
+- **状态管理**: Pinia
+- **UI 组件**: @lingyzh/ui 及其设计 tokens
 - **构建工具**: Vite
-- **图标**: Lucide React
+- **图标**: lucide-vue-next
 
 ---
 
@@ -192,13 +191,13 @@ xattr -cr /Applications/Kiro\ Account\ Manager.app
 
 ### 环境要求
 
-- Node.js >= 18
+- Node.js 20.x 且 >= 20.19，或 Node.js >= 22.12
 - npm >= 9
 
 ### 安装依赖
 
 ```bash
-npm install
+npm ci
 ```
 
 ### 开发模式
@@ -207,9 +206,16 @@ npm install
 npm run dev
 ```
 
+`npm run dev` 默认启动 Vue 界面；`npm run dev:vue` 保留为兼容别名。
+
 ### 构建应用
 
+`npm run build` 统一运行项目检查并构建 Vue 应用；`npm run build:vue` 保留为兼容别名。各平台构建命令也会先运行同一套检查。
+
 ```bash
+# 检查并构建应用
+npm run build
+
 # Windows
 npm run build:win
 
@@ -221,6 +227,8 @@ npm run build:linux
 ```
 
 ### 构建多架构版本
+
+直接为指定架构运行 `electron-builder` 前，请先执行 `npm run build`。
 
 ```bash
 # Windows 64位
@@ -272,6 +280,16 @@ npx electron-builder --linux --arm64
 ---
 
 ## 📋 更新日志
+
+### v1.8.0 (2026-10-01) — Vue 界面与品牌升级
+
+- Vue 3 界面现为默认入口，采用 Pinia 和 `@lingyzh/ui`；已移除旧 React 界面及其依赖。
+- 完成全部 15 个业务页面及账号、代理、注册、订阅等业务弹窗迁移；提供浅色、深色、跟随系统主题与可折叠纵向导航。
+- 更新应用、托盘和安装器品牌图标，移除关于页的加入群聊入口。
+- 保留原有 `AccountData` 数据和账号、设置、代理等兼容行为。
+- 开发启动器支持 Windows、macOS 和 Linux；保留原 Vue 开发/构建命令作为兼容别名。
+- 类型、协议/数据合同及离线 Electron 开发/构建回归通过，Windows x64 解包及 ASAR 页面检查通过。
+- 离线验证结果及真实系统验证边界见 [Phase 4 验证文档](docs/vue-phase4-validation.md)。
 
 ### v1.7.9 (2026-9-29) — Claude Desktop 一键网关配置
 

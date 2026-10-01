@@ -11,7 +11,7 @@ Claude Code users: see [gateway compatibility, cache behavior, and recommended s
 </p>
 
 <p align="center">
-  <img src="Kiro-account-manager/src/renderer/src/assets/交流群.png" width="200" alt="QQ Group">
+  <img src="Kiro-account-manager/resources/community-qr.png" width="200" alt="QQ Group">
 </p>
 
 <p align="center">
@@ -57,8 +57,7 @@ Claude Code users: see [gateway compatibility, cache behavior, and recommended s
 - Configurable balance threshold and check interval
 
 ### 🎨 Personalization
-- 21 theme colors available (grouped by color family)
-- Dark/Light mode toggle
+- Light, dark, and follow-system appearance modes
 - Privacy mode to hide sensitive information
 
 ### 🌐 Proxy Support
@@ -90,7 +89,7 @@ Manage device identifier, prevent account association bans, backup and restore.
 ![Machine ID Management](Kiro-account-manager/resources/机器码管理.png)
 
 ### Settings
-Configure theme colors, privacy mode, auto refresh, proxy and more.
+Configure appearance, privacy mode, auto refresh, proxy and more.
 
 ![Settings](Kiro-account-manager/resources/设置.png)
 
@@ -180,11 +179,11 @@ xattr -cr /Applications/Kiro\ Account\ Manager.app
 
 ## 🛠️ Tech Stack
 
-- **Framework**: Electron + React + TypeScript
-- **State Management**: Zustand
-- **Styling**: Tailwind CSS
+- **Framework**: Electron + Vue 3 + TypeScript/JavaScript
+- **State Management**: Pinia
+- **UI Components**: @lingyzh/ui with its design tokens
 - **Build Tool**: Vite
-- **Icons**: Lucide React
+- **Icons**: lucide-vue-next
 
 ---
 
@@ -192,13 +191,13 @@ xattr -cr /Applications/Kiro\ Account\ Manager.app
 
 ### Requirements
 
-- Node.js >= 18
+- Node.js 20.x >= 20.19, or Node.js >= 22.12
 - npm >= 9
 
 ### Install Dependencies
 
 ```bash
-npm install
+npm ci
 ```
 
 ### Development Mode
@@ -207,9 +206,16 @@ npm install
 npm run dev
 ```
 
+`npm run dev` starts the Vue interface. `npm run dev:vue` remains available as a compatibility alias.
+
 ### Build Application
 
+`npm run build` runs the project checks and builds the Vue application. `npm run build:vue` remains available as a compatibility alias. The platform build scripts run the same checks before packaging.
+
 ```bash
+# Check and build the application
+npm run build
+
 # Windows
 npm run build:win
 
@@ -221,6 +227,8 @@ npm run build:linux
 ```
 
 ### Build Multi-Architecture
+
+Run `npm run build` before invoking `electron-builder` directly for a specific architecture.
 
 ```bash
 # Windows 64-bit
@@ -272,6 +280,16 @@ The project is configured with GitHub Actions workflow for auto building all pla
 ---
 
 ## 📋 Changelog
+
+### v1.8.0 (2026-10-01) — Vue Interface and Branding Update
+
+- Vue 3 is now the default interface, using Pinia and `@lingyzh/ui`; the old React interface and its dependencies have been removed.
+- Migrated all 15 pages and account, proxy, registration, subscription and other business dialogs, with light/dark/system themes and collapsible vertical navigation.
+- Updated application, tray and installer branding and removed the About page's group-chat entry.
+- Existing `AccountData` and compatible account, settings, and proxy behavior are preserved.
+- The development launcher supports Windows, macOS and Linux; previous Vue development/build commands remain as aliases.
+- Type checks, protocol/data contracts and offline Electron development/build regressions pass, along with Windows x64 unpacked and ASAR page checks.
+- See [Phase 4 validation](docs/vue-phase4-validation.md) for offline results and the limits of real-system verification.
 
 ### v1.7.9 (2026-9-29) — Claude Desktop Gateway Setup
 

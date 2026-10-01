@@ -1,5 +1,6 @@
 <script setup>
-import { UiButton, UiTooltip, UiMenu, UiMenuItem } from '@lingyzh/ui'
+import { computed } from 'vue'
+import { UiButton, UiTabs, UiMenu, UiMenuItem } from '@lingyzh/ui'
 import {
     Home,
     Users,
@@ -21,7 +22,7 @@ import {
     Palette,
     Languages
 } from 'lucide-vue-next'
-import logo from '@shared/assets/Kiro Logo.svg'
+import logo from '@shared/assets/kam-logo.png'
 import { useTranslation } from '../../composables/useTranslation'
 import { useAppStore } from '../../stores/app'
 import { useSettingsStore } from '../../stores/settings'
@@ -51,6 +52,8 @@ const pages = [
 ]
 const themeModes = ['light', 'dark', 'system']
 const languages = ['auto', 'zh', 'en']
+const pageIcons = Object.fromEntries(pages.map((page) => [page.id, page.icon]))
+const tabItems = computed(() => pages.map((page) => ({ id: page.id, label: t(`nav.${page.id}`) })))
 
 function navigate(page) {
     emit('navigate', page)
@@ -79,27 +82,32 @@ function setLanguage(language) {
             }}</span>
         </div>
         <nav class="kam-navigation" :aria-label="t('shell.navigation')">
-            <UiTooltip
-                v-for="page in pages"
-                :key="page.id"
-                :text="t(`nav.${page.id}`)"
-                :focusable="false"
+            <UiTabs
+                :model-value="props.currentPage"
+                :items="tabItems"
+                id-prefix="kam-navigation"
+                orientation="vertical"
+                indicator-side="start"
+                dense
+                :aria-label="t('shell.navigation')"
+                @update:model-value="navigate"
             >
-                <UiButton
-                    class="kam-nav-item"
-                    :variant="props.currentPage === page.id ? 'primary' : 'ghost'"
-                    :rounded="false"
-                    :icon="props.collapsed"
-                    :aria-label="t(`nav.${page.id}`)"
-                    :aria-current="props.currentPage === page.id ? 'page' : undefined"
-                    @click="navigate(page.id)"
-                >
-                    <component :is="page.icon" :size="18" aria-hidden="true" />
-                    <span v-if="!props.collapsed" class="text-truncate">{{
-                        t(`nav.${page.id}`)
-                    }}</span>
-                </UiButton>
-            </UiTooltip>
+                <template #default="{ item }">
+                    <span
+                        class="kam-tab-content d-flex align-center ga-3"
+                        :title="props.collapsed ? item.label : undefined"
+                    >
+                        <component
+                            :is="pageIcons[item.id]"
+                            :size="18"
+                            :role="props.collapsed ? 'img' : undefined"
+                            :aria-label="props.collapsed ? item.label : undefined"
+                            :aria-hidden="!props.collapsed"
+                        />
+                        <span v-if="!props.collapsed" class="text-truncate">{{ item.label }}</span>
+                    </span>
+                </template>
+            </UiTabs>
         </nav>
         <div class="kam-sidebar-footer">
             <UiMenu placement="top-start" :label="t('shell.theme')">
@@ -188,9 +196,6 @@ function setLanguage(language) {
     height: 30px;
     object-fit: contain;
 }
-:global(:root[data-theme='dark']) .kam-logo {
-    filter: invert(1);
-}
 .kam-navigation {
     display: grid;
     align-content: start;
@@ -199,15 +204,10 @@ function setLanguage(language) {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 4px 12px 12px;
+    padding: 4px 0 12px;
 }
-.kam-nav-item {
-    width: 100%;
-    justify-content: flex-start;
-    gap: 12px;
-}
-.is-collapsed .kam-nav-item {
-    justify-content: center;
+.kam-tab-content {
+    min-width: 0;
 }
 .kam-sidebar-footer {
     display: flex;
@@ -217,7 +217,7 @@ function setLanguage(language) {
     padding: 8px 12px;
     border-top: 1px solid var(--border);
 }
-:global(:root[data-reduced-motion='true']) .kam-sidebar {
+:root[data-reduced-motion='true'] .kam-sidebar {
     transition: none;
 }
 @media (prefers-reduced-motion: reduce) {

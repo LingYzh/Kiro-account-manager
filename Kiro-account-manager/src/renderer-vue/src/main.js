@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { setClipboardWriter } from '@lingyzh/ui'
 import '@lingyzh/ui/styles.css'
+import './styles/pages.css'
 import App from './App.vue'
 
 setClipboardWriter(function writeClipboard(text) {

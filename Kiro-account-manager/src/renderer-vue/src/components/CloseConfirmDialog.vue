@@ -30,7 +30,7 @@ onBeforeUnmount(confirmation.dispose)
             <UiButton variant="danger" @click="confirmation.respond('quit')">
                 {{ t('shell.quit') }}
             </UiButton>
-            <UiCheckbox v-model="rememberChoice" :label="t('shell.rememberChoice')" />
+            <UiCheckbox v-model="rememberChoice">{{ t('shell.rememberChoice') }}</UiCheckbox>
         </div>
         <template #footer>
             <UiButton ghost @click="confirmation.respond('cancel')">

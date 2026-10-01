@@ -6,8 +6,8 @@ import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
 // 特征测试（characterization test）：锁定 src/renderer-shared/lib/ 下纯函数模块的
-// 现有行为，作为 React -> Vue 迁移期间的安全网。断言值均取自现有实现的真实运行结果，
-// 不代表"正确"或"期望"行为——发现的可疑之处见各模块注释与 task-5-report.md。
+// 兼容行为，供 Vue 渲染层和主进程相关逻辑持续验证。断言值来自既有实现；
+// 可疑边界在对应测试段落注明，调整行为时需明确更新合同。
 const tempDir = await mkdtemp(join(tmpdir(), 'kiro-renderer-shared-'))
 
 try {

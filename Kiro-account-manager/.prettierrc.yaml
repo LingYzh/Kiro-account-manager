@@ -12,3 +12,7 @@ overrides:
   - files: ['test/renderer-*.mjs', 'test/fixtures/vue-*.ts']
     options:
       tabWidth: 4
+  - files: ['electron.vite.config.ts', 'eslint.config.mjs', 'scripts/dev.mjs', 'package.json', 'tsconfig.web.json', 'tsconfig.vue.json', '.vscode/launch.json', 'test/fixtures/vue-*.cjs']
+    options:
+      tabWidth: 4
+      endOfLine: auto

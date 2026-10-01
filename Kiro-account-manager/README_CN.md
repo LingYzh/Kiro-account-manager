@@ -54,8 +54,7 @@
 - 自动检测系统语言或手动选择
 
 ### 🎨 个性化
-- 21 种主题颜色可选
-- 深色/浅色模式切换
+- 浅色、深色和跟随系统的外观模式
 - 隐私模式隐藏敏感信息
 
 ### 📝 账号注册
@@ -110,36 +109,44 @@
 
 ## 🛠️ 技术栈
 
-- **前端框架**: React 18 + TypeScript
+- **前端框架**: Vue 3 + TypeScript/JavaScript
 - **桌面框架**: Electron
-- **状态管理**: Zustand
-- **UI 组件**: Radix UI + Tailwind CSS
-- **图标库**: Lucide React
+- **状态管理**: Pinia
+- **UI 组件**: @lingyzh/ui 及其设计 tokens
+- **图标库**: lucide-vue-next
 - **构建工具**: Vite
 
 ---
 
 ## 🚀 开发
 
+需要 Node.js 20.x 且 >= 20.19，或 Node.js >= 22.12，以及 npm >= 9。
+
 ```bash
 # 安装依赖
-npm install
+npm ci
 
-# 启动开发服务器
+# 启动 Vue 开发界面
 npm run dev
 
 # 构建生产版本
 npm run build
 
 # 类型检查
-npm run typecheck
+npm run typecheck:vue
 ```
+
+`npm run dev:vue` 和 `npm run build:vue` 保留为兼容别名。完整开发说明见根目录 [README](../README_CN.md)。
 
 ---
 
 ## 📋 更新日志
 
-### v1.7.0（当前版本）
+### v1.8.0 (2026-10-01) — Vue 界面与品牌升级
+
+Vue 3 界面现为默认入口。旧 React 界面及其依赖已移除，原有 `AccountData` 格式和兼容行为保留。当前迁移与验证详情见根目录 [README](../README_CN.md) 和 [Phase 4 验证文档](../docs/vue-phase4-validation.md)。
+
+### v1.7.0（历史版本）
 
 #### 🔥 重大功能（4 期累计 19 项新功能）
 

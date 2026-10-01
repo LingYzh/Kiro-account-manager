@@ -1,9 +1,8 @@
 /**
- * 账号视图共享工具（框架无关部分）— AccountCard / AccountListRow 复用
+ * 账号视图共享工具（框架无关部分）— 供账户列表与筛选复用
  * 保证两种视图（卡片 / 列表）视觉系统一致
  *
- * 注意：返回 CSSProperties 的函数（generateGlowStyle 等）依赖 React 类型，
- * 留在 src/renderer/src/components/accounts/_helpers.ts，未移入本文件。
+ * 与组件框架相关的样式生成逻辑由具体视图维护，不属于此纯函数模块。
  */
 import type { Account } from '@shared/types/account'
 

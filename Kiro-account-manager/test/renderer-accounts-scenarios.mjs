@@ -6,12 +6,11 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
-// 两版共用同一套特征断言；浏览器和 IPC 均为合成 mock。
+// 同一套特征断言通过适配器验证真实 Pinia stores；浏览器和 IPC 均为合成 mock。
 export async function runAccountsStoreScenarios(entryPoint, rendererRoot, label) {
-    // 特征测试（characterization test）：锁定 React 版 zustand accounts store
-    // （src/renderer/src/store/accounts.ts，3510 行）的现有行为，作为后续 Pinia 迁移的
-    // 验收基线。不修改 store 源码；断言值均取自现有实现的真实运行结果，疑似 bug 照实
-    // 锁定并在下方各段注释与 task-6-report.md 中说明。
+    // 这五组特征断言最初从旧版账号 store 的行为建立基线；现在通过 Vue 适配器
+    // 对真实 Pinia stores 执行，持续锁定持久化、导入导出、代理池等兼容合同。
+    // 疑似旧行为缺陷仍按实际合同断言，并在对应段落标注。
 
     // ============ 静默 console，测试结束后恢复 ============
     // store 内部大量 console.log/warn/error（如 [Store]、[AutoSave]、[MachineId] 等前缀），
@@ -132,7 +131,7 @@ export async function runAccountsStoreScenarios(entryPoint, rendererRoot, label)
             target: 'es2022',
             outfile,
             alias,
-            // zustand/uuid 走 npm 包，直接打包进产物；不 external，避免测试环境再解析路径
+            // 被测入口的 npm 依赖一起打包，避免临时测试目录再次解析包路径。
             logLevel: 'silent',
             define: { 'process.env.NODE_ENV': '"production"' }
         })
@@ -353,8 +352,8 @@ export async function runAccountsStoreScenarios(entryPoint, rendererRoot, label)
 
             // 基线：AccountData 接口里声明的 4 个字段（autoRefreshSyncInfo/currentMachineId/
             // originalMachineId/originalBackupTime）输入里都给了值，但 flushSaveImmediately 的
-            // 落盘对象里完全没有这些 key。这 4 个字段分两类疑似 bug（照实锁定，不代表其正确性，
-            // 留给 Pinia 迁移决定是否修）：
+            // 落盘对象里完全没有这些 key。这 4 个字段分两类既有边界
+            // （照实锁定，不代表其正确性；改变时需明确更新兼容合同）：
             //   - autoRefreshSyncInfo：loadFromStorage 会读取 data.autoRefreshSyncInfo 存入内存，
             //     且有专门的 setter（setAutoRefreshSyncInfo）会调用 saveToStorage，但改动永远不会
             //     真正写入磁盘——"读入但不写回"。
@@ -850,11 +849,9 @@ export async function runAccountsStoreScenarios(entryPoint, rendererRoot, label)
             resetAll()
 
             // ---- 4c：importAccounts（简化格式导入）对重复账号的实际行为 ----
-            // 注意：源码走查显示 importAccounts（1137-1213 行）完全没有去重逻辑——每次调用都会
-            // 用 uuidv4() 生成全新 id，对所有输入项一律 result.success++，即使 email 完全重复。
-            // 去重只存在于 importFromExportData（isAccountExists，见 4b）。这与 brief 里
-            // "importAccounts 对重复账号的跳过计数" 的描述不符：按实际代码锁定行为，不代表
-            // brief 预期正确，留给 Pinia 迁移时确认是否需要补上去重。
+            // importAccounts 的简化格式路径对重复邮箱不去重；再次导入会生成新 id。
+            // importFromExportData 才执行账号去重（见 4b）。这里锁定的是现有合同，
+            // 若调整去重策略，应同步更新这组断言。
             loadAccountsReturnValue = {
                 accounts: {},
                 groups: {},

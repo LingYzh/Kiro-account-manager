@@ -1,0 +1,64 @@
+/* Business layout; shared controls and colors come from the published UI library. */
+.kam-content > .ui-tab-panel {
+    min-height: 100%;
+    height: 100%;
+}
+.kam-page {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 24px;
+    max-width: 1320px;
+    margin: 0 auto;
+    font-size: 14px;
+    line-height: 1.6;
+}
+.kam-page-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.kam-page h1 {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.3;
+    font-weight: 650;
+}
+.kam-page p {
+    margin: 0;
+}
+.kam-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.kam-grid,
+.kam-field-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+.kam-muted {
+    color: var(--muted);
+}
+.kam-mono {
+    font-family: var(--mono);
+    overflow-wrap: anywhere;
+}
+.kam-dialog-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+@media (max-width: 900px) {
+    .kam-grid,
+    .kam-field-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .kam-page {
+        padding: 16px;
+    }
+}

@@ -54,8 +54,7 @@
 - Auto-detect system language or manual selection
 
 ### 🎨 Personalization
-- 21 theme colors available
-- Dark/Light mode toggle
+- Light, dark, and follow-system appearance modes
 - Privacy mode to hide sensitive information
 
 ### 📝 Account Registration
@@ -110,36 +109,44 @@
 
 ## 🛠️ Tech Stack
 
-- **Frontend**: React 18 + TypeScript
+- **Frontend**: Vue 3 + TypeScript/JavaScript
 - **Desktop**: Electron
-- **State Management**: Zustand
-- **UI Components**: Radix UI + Tailwind CSS
-- **Icons**: Lucide React
+- **State Management**: Pinia
+- **UI Components**: @lingyzh/ui with its design tokens
+- **Icons**: lucide-vue-next
 - **Build Tool**: Vite
 
 ---
 
 ## 🚀 Development
 
+Requires Node.js 20.x >= 20.19 or Node.js >= 22.12, and npm >= 9.
+
 ```bash
 # Install dependencies
-npm install
+npm ci
 
-# Start development server
+# Start the Vue development interface
 npm run dev
 
 # Build for production
 npm run build
 
 # Type check
-npm run typecheck
+npm run typecheck:vue
 ```
+
+`npm run dev:vue` and `npm run build:vue` remain compatibility aliases. The root [README](../README.md) has the full development guide.
 
 ---
 
 ## 📋 Changelog
 
-### v1.7.0 (Current)
+### v1.8.0 (2026-10-01) — Vue Interface and Branding Update
+
+Vue 3 is now the default interface. The previous React interface and its dependencies have been removed while the existing `AccountData` format and compatible behavior are preserved. See the root [README](../README.md) and [Phase 4 validation](../docs/vue-phase4-validation.md) for current migration and verification details.
+
+### v1.7.0 (Historical)
 
 #### 🔥 Major Features (4 phases, 19 new features)
 
