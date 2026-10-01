@@ -46,8 +46,17 @@
 
 自动审批曾拒绝递归删除；之后采用校验绝对路径的可恢复归档移出方式完成。npm 卸载成功，但旧运行进程锁住的 ignored Tailwind 原生临时目录未被强制删除；manifest/lock 与产物已不引用它。没有终止用户进程。
 
-## 未执行的系统和平台验收
+## 系统和平台验收边界
 
-当前设备验证限于 Windows x64 解包构建和离线 Electron。三平台 CI 源码仍调用默认 `npm run build`，Windows 单次 x64/ia32/arm64 universal NSIS、latest.yml 与 macOS/Linux 架构配置保持；本轮没有运行 Release CI、macOS/Linux 原生打包、Windows 三架构 NSIS/安装/自动更新。
+Phase 4 本机验证限于 Windows x64 解包构建和离线 Electron。随后用户授权发布，三平台 CI 已执行并通过，见下一节；本机仍未执行各平台实际安装/自动更新或生产主进程业务运行。
 
 实际托盘/窗口、账号持久化往返、注册/订阅支付、代理服务、通知送达、机器码/权限、文件写入与证书安装按 [系统清单](vue-phase2-validation.md) 在相应环境验收。测试使用合成数据、临时 userData 和离线 preload，不加载生产主进程/账号，不运行消费额度的 `test:e2e`。
+
+## v1.8.0 合并与发布完成
+
+- 用户授权后，迁移快进合并 master；发布提交 `a69a6a6f17c46ea1f846f742ec1d94223665bc9d`，master、迁移分支和 `v1.8.0` 标签已推送，IDE 文件没有提交。
+- package/lock 两级版本和四份 README 首条日志同步 1.8.0，版本更新后的默认 `npm run build`（含主进程/Vue 类型检查）再次通过。
+- [Build & Release 36839452848](https://github.com/LingYzh/Kiro-account-manager/actions/runs/36839452848) conclusion=success。Windows x64/ia32/arm64 通用 NSIS、macOS x64/arm64、Linux x64/arm64/armv7l 的依赖安装、构建、打包与产物上传均成功，Release job 成功。
+- [v1.8.0 正式 Release](https://github.com/LingYzh/Kiro-account-manager/releases/tag/v1.8.0) 已发布，draft=false、prerelease=false，共 22 个产物，双语日志均为 v1.8.0。
+- 发布后读取实际更新清单并核对：`latest.yml` 仅指向 `kiro-account-manager-1.8.0-setup.exe`，Release 只有一个 EXE；`latest-mac.yml` 同时包含 x64/arm64 ZIP 与 DMG；Linux x64/arm64/armv7l 各自清单引用 AppImage/DEB。所有清单 version=1.8.0，引用文件存在、大小与 Release metadata 一致、SHA512 是 64 字节格式；未下载全部安装包重新计算摘要。
+- 发布完成不代表实际安装/更新或真实账号/系统业务已经验收，前述边界保持。发布后的文档检查点另行保存于 master，不移动已发布标签。

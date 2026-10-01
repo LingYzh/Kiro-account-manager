@@ -4,11 +4,11 @@
 
 ## 当前进展：Phase 4 默认 Vue 与清理
 
-用户在 Phase 3 全页面离线验收后明确要求“开始phase4吧”，随后授权合并 master 并发布。默认 `dev/build/typecheck:web` 已切换到 Vue，旧 React 渲染源码、专用预览和 17 项直接依赖已归档/移除；package/lock 和双语日志同步至 1.8.0。发布使用 `v1.8.0` 标签触发 Build & Release，三平台完成后生成 GitHub Release；具体运行结果以 Actions 为准。品牌、托盘和图标修改随迁移保存，原有 IDE 工作区文件保持本地。
+用户在 Phase 3 全页面离线验收后明确要求“开始phase4吧”，随后授权合并 master 并发布。默认 `dev/build/typecheck:web` 已切换到 Vue，旧 React 渲染源码、专用预览和 17 项直接依赖已归档/移除；package/lock 和双语日志同步至 1.8.0。迁移已快进合并并推送 master，`v1.8.0` 标签指向发布提交 `a69a6a6f17c46ea1f846f742ec1d94223665bc9d`。[Build & Release 36839452848](https://github.com/LingYzh/Kiro-account-manager/actions/runs/36839452848) 全部成功，[正式 Release](https://github.com/LingYzh/Kiro-account-manager/releases/tag/v1.8.0) 已发布 22 个产物。品牌、托盘和图标修改随迁移保存，原有 IDE 工作区文件保持本地。
 
 15 个业务页及业务弹窗全部实现：首页、账号、机器码、Kiro 设置、API 反代、KProxy、代理池、注册、订阅、Webhooks、诊断、配置同步、日志、设置与关于。页面首次访问创建，隐藏保留实例，卸载释放订阅/定时器。ExportDialog、UpdateDialog 与关闭确认均已接入。按用户要求，应用没有加入群聊按钮或二维码弹窗；README 联络图片保留于 `resources/community-qr.png`。
 
-Phase 4 的默认入口回归、Windows x64 解包构建和安装包资源检查见 [当前验收](docs/vue-phase4-validation.md)，范围见 [Phase 4 方案](docs/vue-phase4-plan.md)。真实账号、收费订阅、注册、系统变更及 macOS/Linux 原生包仍待对应环境验收；不能将离线 fixture 结果写成实机业务成功。
+Phase 4 的默认入口回归、Windows x64 解包构建、安装包资源和三平台发布结果见 [当前验收](docs/vue-phase4-validation.md)，范围见 [Phase 4 方案](docs/vue-phase4-plan.md)。真实账号、收费订阅、注册、系统变更及各平台实际安装/运行/自动更新仍待对应环境验收；不能将离线 fixture 或 CI 打包结果写成实机业务成功。
 
 ## 恢复与启动
 
@@ -71,7 +71,7 @@ npm run test:packaged-renderer -- <app.asar绝对路径>
 
 当前结果和本机临时证据路径以 [Phase 4 验收](docs/vue-phase4-validation.md) 为准。离线测试使用合成数据、临时 userData 和离线 preload，不加载生产主进程/账号或运行消费额度的 `test:e2e`。logger/tlsClientPool 原有混合动态/静态导入提示保留。
 
-macOS/Linux 原生打包和 Windows 三架构 NSIS 由本次 Release CI 执行；具体结果以标签关联的 Actions 和 Release 为准。实际安装/自动更新、托盘、OS/文件、账号往返、证书及真实服务仍需在相应环境验收，离线结果不能替代。
+Release CI 已通过 Windows 三架构通用 NSIS、macOS x64/arm64 和 Linux x64/arm64/armv7l 打包。正式发布的 Windows latest.yml 仅指向通用 setup.exe，latest-mac.yml 包含双架构 ZIP/DMG，Linux 分架构清单齐全；全部清单的版本、引用资源、文件大小及 SHA512 格式已核对。实际安装/自动更新、托盘、OS/文件、账号往返、证书及真实服务仍需在相应环境验收，离线结果不能替代。
 
 ## 参考资料
 

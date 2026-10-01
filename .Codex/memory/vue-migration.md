@@ -165,3 +165,10 @@
 - 版本同步后的默认 npm run build（主进程/Vue 类型检查）再次通过。Phase 4 全面离线证据保留；发布通过 master 与 v1.8.0 标签推送触发三平台 Build & Release，工作流和 Windows universal NSIS/latest 契约不改。
 - 发布审查发现 macOS 矩阵上传同名清单的潜在覆盖；root 核实线上 v1.7.9 清单实际含 x64/arm64 双 ZIP 与双 DMG，显式 target.arch 使两任务均产全套，故不凭假设扩大流程改动。新 Release 后需再次核对实际双架构清单。
 - CI/Release 完成状态以 GitHub 为准；发布不代表实际账号、系统写入、安装或更新已经验收。
+
+## 2026-10-01 v1.8.0 发布验收完成
+
+- 发布提交 a69a6a6f17c46ea1f846f742ec1d94223665bc9d，master 快进合并后与迁移分支/v1.8.0 标签原子推送成功；IDE 未跟踪文件保持本地。
+- Build & Release 36839452848 success：Windows 三架构通用 NSIS、macOS x64/arm64、Linux x64/arm64/armv7l 全部构建/打包/上传及 release job 成功。正式 Release https://github.com/LingYzh/Kiro-account-manager/releases/tag/v1.8.0 已发布 22 产物，非 draft/prerelease，双语更新日志正确。
+- 核对实际下载的全部 latest*.yml：版本1.8.0、引用产物存在、文件大小与 metadata 一致、SHA512 格式正确。Windows 只有一份通用 EXE；macOS 清单含双 ZIP/DMG；Linux 三架构 AppImage/DEB 齐全。未重新下载全部安装包计算摘要，也未执行真实安装/自动更新或生产账号业务。
+- HANDOFF/AGENTS/Phase4 验收记录更新实际 CI/Release 结果，发布后文档另存 master，已发布标签不移动。

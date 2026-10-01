@@ -36,7 +36,7 @@
 - Vue 数据跨 Electron IPC 前使用 `lib/ipcData.ts` 的 `toIpcData()` 移除嵌套响应式 Proxy，保留文档字段与 undefined；不要直接把 Pinia 对象传给 preload。
 - Vue 专属主题键为 `kiro-vue-theme-mode`（light/dark/system），AccountData 的旧 theme 原样透传，darkMode 仍存实际布尔值；业务设置页复用 app.setThemeMode。Phase 2 既有行为全部保留，验收步骤见 `docs/vue-phase2-validation.md`。
 - 用户要求接下来不使用 superpowers 插件技能组；原方案文档所在目录仅保留历史文件，不代表启用该插件。
-- 最新交接见根目录 `HANDOFF.md`：Phase 3 全部 15 页和业务弹窗已实现，用户授权 Phase 4 后默认入口已切换 Vue，旧 React 源码/依赖已清理。侧栏使用纵向 UiTabs，深色使用 UI 库原生 tokens；当前验证见 `docs/vue-phase4-validation.md`，真实系统与其他平台验收仍待执行。
+- 最新交接见根目录 `HANDOFF.md`：Phase 3/4 已完成并合并 master，v1.8.0 三平台 CI 成功且正式发布，默认使用 Vue，旧 React 源码/依赖已清理。侧栏使用纵向 UiTabs，深色使用 UI 库原生 tokens；当前验证见 `docs/vue-phase4-validation.md`，真实系统、实际安装/运行/自动更新仍待验收。
 - 项目记录位于 `.Codex/memory/`。不要把凭证、真实请求正文或抓包写入记录。
 - 排查工具后中断时区分适配器完成、HTTP finish 和客户端 tool_result 回传；转换后历史不能代替原始入站证据。使用请求级里程碑日志关联，避免通过重复执行工具试探问题。
 - EventStream 必须校验两级 CRC 与帧/header 边界；损坏流和工具参数不能伪装为成功。Runtime 与 Generate 的结束契约需分开验证，详见 `.Codex/memory/kiro-protocol-audit.md`。
